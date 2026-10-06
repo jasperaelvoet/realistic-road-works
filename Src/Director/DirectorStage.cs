@@ -586,6 +586,8 @@ namespace RealisticRoadWorks.V3.Director
                 open = AntiChurn(proj, ps, before, open);
                 // releasing (completion, D0 call-off): nothing closes any more, the release gate opens the whole road
                 if (proj.Releasing) open |= before & RoadZones.AllLanes & ~RoadZones.Parking & ~softWant;
+                // upgrade works: lane groups taken over closed from another project stay closed while its machines leave them
+                if (proj.Mode == VisualMode.HalfWidth) open &= ~ps.UwCarry;
                 var closing = before & ~open & RoadZones.AllLanes;
                 var re = closing & ~stage.Soft;
                 if (re != RoadZones.None && proj.Phase != WorksPhase.Complete)

@@ -10,6 +10,7 @@ namespace RealisticRoadWorks.V3
         public const int PropRegistry = 52;           // Props: effect clones (RRW Amber Light, RRW Dust VFX) + carriers (beacon barrier, dust heaps).
                                                       // Before MachineRegistry: the excavator clone references RRW Dust VFX.
         public const int MachineRegistry = 55;        // Machines: "RRW Road Excavator" vehicle clones (no big dust)
+        public const int LaneClosureRegistry = 57;    // Traffic: "RRW Lane Closure" clone (PrefabUpdate, before PrefabInitializeSystem)
 
         // ToolUpdate / ApplyTool
         public const int BulldozeIntercept = 100;     // Tools: After BulldozeToolSystem

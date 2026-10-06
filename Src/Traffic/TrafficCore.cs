@@ -248,6 +248,9 @@ namespace RealisticRoadWorks.V3.Traffic
         public RoadZones ClosedB;           // car groups carrying CLOSED-B (blockage instead of the sentinel)
         public RoadZones OpenPresent;       // groups of the lanes that really carry traffic (car / pedestrian / track lanes)
         public LaneGroups Groups;           // shared with the edge's TrafficEdgeSlot (registry edges) or own (dev)
+        // ---- upgrade works: empty new parking lanes switched off (ParkingDisabled only, no sentinel). Shared with the edge's
+        //      EdgeUpgradeTraffic (null on every other edge).
+        public HashSet<Entity> ParkingOff;
 
         // ---- dev closures (rrw.tr.close, Traffic dev commands only): explicit per-lane states, never reconciled.
         public Dictionary<Entity, LaneState> DevLanes;
@@ -437,6 +440,17 @@ namespace RealisticRoadWorks.V3.Traffic
         public const int kBfsBudget = 2000;                 // cut-edge BFS node budget per side
         public const int kDrainCleanScans = 2;              // two clean scans kDrainCheckUpdates apart = drained
         public const int kPendingBWarnUpdates = 600;        // rrw.check P4: a drained car group still not CLOSED-B after this
+        // ---- upgrade works
+        public const float kDropOpenLaneClear = 0.75f;      // lane closure marker edge (radius kBlockerRadius) at least this far from the
+                                                            // edge of every lane that stays open (closer: the whole direction is blocked)
+        public const int kDropRegisterTries = 8;            // updates new markers may wait for the game to register them on their lane
+        public const int kDropBlockageTries = 16;           // updates a dropped lane may wait for its blockage after the refresh
+        public const float kDropMachineClear = 1.0f;        // a machine body this close to a released lane's edge (or a switched-off parking lane
+                                                            // on its way back into use) keeps the lane closed
+        public const float kDropMachineMaxHalf = 3.0f;      // widest machine body across the road on either side of its root (the excavator's
+                                                            // swept half width is about 2.9 m); caps the unscaled prefab box of a scaled puppet
+        public const int kParkingOffCheckInterval = 16;     // updates between the new-parking checks of one edge
+        public const int kDetourRecheckUpdates = 1024;      // detour verdict re-computed this often (and on every project revision)
     }
 
     // Shared static state. Main thread only. Reset on every game preload.
@@ -467,6 +481,12 @@ namespace RealisticRoadWorks.V3.Traffic
 
         // Opened edges whose lanes are checked for left-over closure values a few updates later.
         public static readonly List<Entity> VerifyEdges = new List<Entity>();
+
+        // Upgrade works: lane drops, switched-off new parking, released markers (TrafficUpgrade.cs), and the lanes / edges refreshed
+        // one update after markers were removed (entity -> update due).
+        public static readonly Dictionary<Entity, EdgeUpgradeTraffic> Upgrade = new Dictionary<Entity, EdgeUpgradeTraffic>();
+        public static readonly Dictionary<Entity, uint> UpgradeRefresh = new Dictionary<Entity, uint>();
+        public static int MarkersPlaced, MarkersRemoved, MarkersMisregistered, DropFailures;
         public static uint VerifyDue;
         public static bool VerifyPending;
 
@@ -531,8 +551,14 @@ namespace RealisticRoadWorks.V3.Traffic
             RelocatedTotal = 0;
             SaveNeutralised = false;
             SaveFreeSpace.Clear();
+            int u = Upgrade.Count;
+            Upgrade.Clear();
+            UpgradeRefresh.Clear();
+            MarkersPlaced = MarkersRemoved = MarkersMisregistered = DropFailures = 0;
+            UpgradeTraffic.Reset();
+            LaneClosureMarkers.ClearSaveState();
             TrafficAnalysis.ClearCaches();
-            if (n > 0) RRWLog.Info("traffic state reset (" + why + "), dropped " + n + " closures");
+            if (n > 0 || u > 0) RRWLog.Info("traffic state reset (" + why + "), dropped " + n + " closures and " + u + " upgrade edges");
         }
 
         // Queue the lanes of `cl` that carry a closed state (Soft / ClosedS / ClosedB) and whose group touches `bits`
@@ -733,6 +759,14 @@ namespace RealisticRoadWorks.V3.Traffic
             return cl.Level == ClosureLevel.Closed && cl.ParkClosed && !cl.LaneIsOpen(em, lane);
         }
 
+        // An empty new parking lane of upgrade works switched off (and not closed by the closure itself).
+        public static bool LaneParkOff(EntityManager em, Entity lane, EdgeClosure cl) =>
+            cl.ParkingOff != null && cl.ParkingOff.Contains(lane) && !LaneParkClosed(em, lane, cl);
+
+        // Blockage of ours on some lane of the closure's edge (CLOSED-B / HardClose, or upgrade lane closure markers): the parking
+        // free space computed now is not the vanilla one.
+        public static bool EdgeBlocked(EdgeClosure cl) => cl.AnyBlockage || UpgradeTraffic.HasMarkers(cl.Edge);
+
         // Soft with Forbidden on this car lane now.
         private static bool WantsForbidden(LaneState st, EdgeClosure cl) => st == LaneState.Soft && cl.SoftModeApplied == SoftMode.Forbidden;
 
@@ -792,12 +826,14 @@ namespace RealisticRoadWorks.V3.Traffic
             bool has = TrafficState.Snaps.TryGetValue(lane, out var snap);
             var p = em.GetComponentData<NetParkingLane>(lane);
             bool parkClosed = LaneParkClosed(em, lane, cl);
+            bool parkOff = !parkClosed && LaneParkOff(em, lane, cl);
             if (snapshot)
             {
                 bool dirty = false;
-                // Free space computed without any blockage of ours (the save guard writes it back under HardClose / CLOSED-B).
-                if (!cl.AnyBlockage) { snap.HasFreeSpace = true; snap.FreeSpaceUnblocked = p.m_FreeSpace; dirty = true; }
-                if (parkClosed) { snap.HasParking = true; snap.Parking = p; dirty = true; }
+                // Free space computed without any blockage of ours (the save guard writes it back under HardClose / CLOSED-B /
+                // lane closure markers).
+                if (!EdgeBlocked(cl)) { snap.HasFreeSpace = true; snap.FreeSpaceUnblocked = p.m_FreeSpace; dirty = true; }
+                if (parkClosed || parkOff) { snap.HasParking = true; snap.Parking = p; dirty = true; }
                 else if (has && snap.HasParking)
                 {
                     // Parking is vanilla again (SlowZone / building appeared / dev lane opened): never write an old snapshot back.
@@ -805,6 +841,13 @@ namespace RealisticRoadWorks.V3.Traffic
                     dirty = true;
                 }
                 if (dirty) TrafficState.Snaps[lane] = snap;
+            }
+            if (parkOff)
+            {
+                // An empty new parking lane: no new car parks there until its band is built (no sentinel: nothing to drain).
+                p.m_Flags |= ParkingLaneFlags.ParkingDisabled;
+                em.SetComponentData(lane, p);
+                return 1;
             }
             if (!Parking(ref p, parkClosed, sentinel)) return 0;
             em.SetComponentData(lane, p);
@@ -842,7 +885,8 @@ namespace RealisticRoadWorks.V3.Traffic
                 t.m_AccessRestriction = s.Track.m_AccessRestriction;
                 em.SetComponentData(lane, t); n++;
             }
-            if (em.HasComponent<NetParkingLane>(lane) && (s.HasParking || cl.AnyBlockage))
+            bool blocked = EdgeBlocked(cl);
+            if (em.HasComponent<NetParkingLane>(lane) && (s.HasParking || blocked))
             {
                 var p = em.GetComponentData<NetParkingLane>(lane);
                 if (s.HasParking)
@@ -851,7 +895,7 @@ namespace RealisticRoadWorks.V3.Traffic
                     var mask = ParkingLaneFlags.ParkingDisabled | ParkingLaneFlags.AllowEnter | ParkingLaneFlags.AllowExit;
                     p.m_Flags = (p.m_Flags & ~mask) | (s.Parking.m_Flags & mask);
                 }
-                if (cl.AnyBlockage)
+                if (blocked)
                 {
                     // m_FreeSpace is serialized and only recomputed on a lane refresh; a 0 written into a save would
                     // keep the kerb "full" forever without the mod. Write the last unblocked value (curve length if
@@ -953,10 +997,11 @@ namespace RealisticRoadWorks.V3.Traffic
                 bool restr = sentinel != Entity.Null && p.m_AccessRestriction == sentinel;
                 bool disabled = (p.m_Flags & ParkingLaneFlags.ParkingDisabled) != 0;
                 bool parkClosed = cl != null && LaneParkClosed(em, lane, cl);
-                bool pass = parkClosed ? restr && disabled : !restr;
+                bool parkOff = cl != null && !parkClosed && LaneParkOff(em, lane, cl);
+                bool pass = parkClosed ? restr && disabled : parkOff ? disabled && !restr : !restr;
                 if (!pass) ok = false;
                 if (sb != null)
-                    sb.Append(" parking disabled=").Append(disabled).Append(" restr=").Append(restr ? "SENTINEL" : RRWLog.E(p.m_AccessRestriction))
+                    sb.Append(" parking").Append(parkOff ? "(new, off)" : "").Append(" disabled=").Append(disabled).Append(" restr=").Append(restr ? "SENTINEL" : RRWLog.E(p.m_AccessRestriction))
                       .Append(" free=").Append(RRWLog.F(p.m_FreeSpace)).Append(pass ? " ok" : " BAD");
             }
             return ok;

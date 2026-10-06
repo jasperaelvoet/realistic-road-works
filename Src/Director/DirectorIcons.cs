@@ -9,6 +9,9 @@ namespace RealisticRoadWorks.V3.Director
     // Notification icons (as in the previous mod version): "Road Maintenance Vehicle" while Closed, "Traffic Bottleneck
     // Notification" while SlowZone (setting) or Closed with an open car half (staged opening, same setting; also while
     // a C4 side swap drains a car half), none when Open or complete.
+    // Upgrade works follow the same rule through their closure: Dressing / None windows are a SlowZone (slow-zone icon), a
+    // carriageway closure has no open car half (closed icon), a lane drop, one-way or sidewalk window keeps car lanes open (slow
+    // zone icon with the setting on).
     // IconCommandSystem de-duplicates by (owner, prefab), so a self-heal re-Add is harmless.
     public partial class WorksDirectorSystem
     {

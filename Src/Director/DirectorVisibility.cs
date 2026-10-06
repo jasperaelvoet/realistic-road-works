@@ -10,7 +10,8 @@ using NetSubLane = Game.Net.SubLane;
 namespace RealisticRoadWorks.V3.Director
 {
     // Nodes, preview adoption and wear. Edge Hidden lives in the edge pass
-    // (WorksDirectorSystem.EdgePass) so it is decided in the same loop that writes the runtime.
+    // (WorksDirectorSystem.EdgePass) so it is decided in the same loop that writes the runtime. Upgrade works are never hidden
+    // (so their nodes never are either) and keep the vanilla wear (PhasePlan.Wear returns -1 for them).
     //
     // Street furniture is NOT held hidden after the reveal: Game.Objects.SubObjectHiddenSystem (Mod5, HiddenSubObjectJob)
     // removes Hidden from every Object whose Owner is not Hidden, every frame, so a Mod1 Hidden on the sub-objects of a

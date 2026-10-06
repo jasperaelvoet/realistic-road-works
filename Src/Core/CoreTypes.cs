@@ -33,9 +33,12 @@ namespace RealisticRoadWorks.V3
     {
         FullDig = 0,      // mode A: hidden road, real trench, decals, machines
         // 1 is unused.
-        HalfWidth = 2,    // RESERVED for a later mode H (visible-road reconstruction band by band).
-                          // Saved value: Persistence accepts it as valid; this version never chooses it (PhasePlan.ChooseMode) and every
-                          // module treats it like Minimal (mode D) if it ever appears in a save written by a newer build.
+        HalfWidth = 2,    // mode H: visible-road band works (partial upgrade works, RoadWorksSite plan kind Upgrade). Created only by
+                          // SiteFactory.CreateUpgradeProjects with a saved upgrade tail; never chosen by PhasePlan.ChooseMode. The road
+                          // stays visible; machines work only in machine-safe sub-strips. The view rules of PhasePlan key their mode H
+                          // branch on ProjectView.IsUpgrade (a HalfWidth view without upgrade data behaves like before). The gameplay
+                          // rules that take a mode instead of a view (Closure, MachinesHoldRoad, Wear) treat EVERY HalfWidth project as
+                          // mode H, on the safe side: slow zone without the primitive, the release holds for machines, vanilla wear.
         Minimal = 3,      // mode D: road stays visible; props + beacons + closure + timer only
     }
 
@@ -130,6 +133,9 @@ namespace RealisticRoadWorks.V3
         Parking = 7,   // RESERVED for later: band parking lane not cleared in time
         LaneLayout = 8,// both directions exist but the lanes do not split into two halves: only shared two-way lanes, interleaved
                        // directions, no lane along the edge (EdgeSection.Verdict), or Traffic found no whole car group in a half
+        Drop = 9,      // upgrade works: single lanes cannot be closed in this version (no lane blockers)
+        Houses = 10,   // upgrade works: buildings along the road, a direction cannot be closed there in this version
+        Waiting = 11,  // upgrade works: the window waits for its inputs (Traffic's classification / detour verdict, band data)
     }
 
     // How Traffic drains a closing group (experimental switch). Runtime selector RRWGates.Soft.
@@ -178,6 +184,11 @@ namespace RealisticRoadWorks.V3
         LeftInner = 1 << 8,
         RightOuter = 1 << 9,
         RightInner = 1 << 10,
+        // Upgrade works (mode H): machine zones on the verge / outside the new road edge (no lane group): Verge and Terrain
+        // sub-strips (UpgradeZones.OfSubStrip, RoadZoneMath.OfBand). Geometry only, never a Traffic group; always machine-safe
+        // outside driveway keep-outs (UpgradeView.MachineSafe includes them).
+        VergeLeft = 1 << 11,
+        VergeRight = 1 << 12,
         Sidewalks = SidewalkLeft | SidewalkRight,
         Parking = ParkingLeft | ParkingRight,
         Carriageway = LeftHalf | RightHalf,
@@ -195,8 +206,12 @@ namespace RealisticRoadWorks.V3
         TempMarking = 5,          // Staged opening: "RRW Temp Marking" yellow temporary lane lines on the half that is open
                                   // to traffic (band TempLines); roundness 0.01, raised queue +200 (2200), prio -87
                                   // (RRWConst.kTempMarking*; dev selectors RRWGates.TempLine*).
-        Count = 6,
-        // RESERVED for later (runtime only, not saved): MarkingBlackout = 6 (queue 2100, prio -88), RoadDirt = 7, Count = 8.
+        MarkingBlackout = 6,      // RESERVED (queue 2100, prio -88): no product layer uses it; spans are always empty
+        RoadDirt = 7,             // upgrade works: "RRW Road Dirt" dug strip on a visible road (raised queue, Terrain|Roads); only on
+                                  // sub-strips without traffic (PhasePlan.UpgradeSpans)
+        OldAsphalt = 8,           // upgrade works: "RRW Old Asphalt" on the removed strip outside the new road (Terrain only), only with
+                                  // RRWGates.UpgradeOldAsphalt; Base Course Cover takes its place otherwise
+        Count = 9,
     }
 
     // Lateral band a surface polygon covers.
@@ -208,7 +223,8 @@ namespace RealisticRoadWorks.V3
         CarriageHalf = 3,         // FreshAsphalt / FreshAsphaltCover in C4 when the car halves are staged
                                   // (ProjectView.HalvesActive): i = 0 chain-left half, i = 1 chain-right half (EdgeSection.HalfBand),
                                   // spans from PhasePlan.SurfaceSpanHalf
-        WorksBand = 4,            // RESERVED for later (mode H band clipping)
+        WorksBand = 4,            // mode H: one polygon per sub-strip of an upgrade band (UpgradeEdgeState.SubStrips), spans from
+                                  // PhasePlan.UpgradeSpans per band and sub-strip cover
     }
 
     // Groups of derived entities (RRWDerived.m_Group). Used for bookkeeping, GC and dev dumps.
@@ -222,7 +238,7 @@ namespace RealisticRoadWorks.V3
         MachinePart = 5,          // puppet trailer / sub-objects (Machines)
         Scar = 6,                 // fading decals after the works (Surfaces; m_Site = Null)
         PostSite = 7,             // puppets leaving a completed site (Machines; m_Site = Null, m_ProjectId kept)
-        LaneBlocker = 8,          // RESERVED for later: invisible "RRW Lane Block" markers (Traffic-owned)
+        LaneBlocker = 8,          // invisible "RRW Lane Closure" blockers on dropped lanes of upgrade works (Traffic-owned, LivePath)
         DustPuff = 9,             // short-lived "RRW Dust Puff" emitter props at the bucket (Machines; m_Site = edge under the
                                   // puff, deleted after RRWConst.kDustPuffLifeSeconds; LivePath like every derived entity)
     }

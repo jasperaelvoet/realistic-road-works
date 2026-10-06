@@ -141,6 +141,8 @@ namespace RealisticRoadWorks.V3.DevCmds
             PerfCrews.Sample();     // rrw.perf crew averages (only while a window is open)
             try { R5Dev.Sample(); } // Rollers-vs-setting and car-half-on-blocked-chain persistence (rrw.check), every 30 updates
             catch (Exception e) { RRWLog.ErrorOnce("dev r5 sample", e); }
+            try { UwCheck.Sample(); } // mode H transient rows of rrw.check (drop key, chain index, puppets), every update
+            catch (Exception e) { RRWLog.ErrorOnce("dev uw sample", e); }
             if (!DevCam.Active) return;
             try
             {

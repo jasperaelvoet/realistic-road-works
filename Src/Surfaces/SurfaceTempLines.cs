@@ -46,6 +46,11 @@ namespace RealisticRoadWorks.V3.Surfaces
 
         private void ProcessTempLines(EdgeCtx c, bool rebuild, bool bypass, bool tickOpen, ref bool wrote, ref bool deferred)
         {
+            if (c.Upgrade && !UpgradeRemarkNow(c.View.Upgrade))
+            {
+                ProcessUpgradeTempLines(c, rebuild, bypass, tickOpen, ref wrote, ref deferred);
+                return;
+            }
             var es = c.Es;
             var v = c.View;
             RoadZones open = v.OpenLanes & RoadZones.Carriageway;
@@ -54,7 +59,9 @@ namespace RealisticRoadWorks.V3.Surfaces
             Entity prefab = SurfaceState.Prefab(SurfaceLayer.TempMarking, 100);
             float ls0 = 0f, ls1 = 0f;
             string why = null;
-            if (!c.ModeA) why = "not mode A";
+            // upgrade works: only edges that re-mark (under one direction at a time the re-marking draws them like a new road's
+            // first painting half)
+            if (!c.ModeA && !(c.Upgrade && m_RemarkOn)) why = c.Upgrade ? "no re-marking on this edge" : "not mode A";
             else if (!SurfacePalette.kTempMarkingOn || prefab == Entity.Null) why = "line clone not registered";
             else if (st == null || !st.TempMarkingsOn) why = "setting TempMarkings off";
             else if (v.Kind != WorksKind.Construction || v.Phase != WorksPhase.Finishing) why = "not in C4";
@@ -114,6 +121,150 @@ namespace RealisticRoadWorks.V3.Surfaces
                 m_FrameLineRows += rows;
                 m_FrameLinePieces += pieces;
             }
+        }
+
+        // ------------------------------------------------------------------ upgrade works: lines of the lanes kept open
+        //
+        // While an upgrade's final markings are still covered (every window before the re-marking), the lanes that carry traffic
+        // get yellow construction lines for the layout that is really open: a centre line between the directions (doubled in
+        // the NA theme), dashed lines between lanes of one direction, and a solid edge line next to a dropped lane. Lanes under
+        // a closed group (carriageway or one direction closed) carry no traffic and get none.
+
+        private struct UwLine { public float C; public bool Dashed; }
+        private struct UwLane { public float Lo, Hi; public sbyte Dir; public bool Open; }
+        private readonly List<UwLine> m_UwLines = new List<UwLine>(8);
+        private readonly List<UwLane> m_UwLanes = new List<UwLane>(8);
+
+        // The re-marking band works now (its lines come from the one-direction re-marking path).
+        private static bool UpgradeRemarkNow(in UpgradeView u)
+        {
+            if (!u.Valid || u.Window < 0 || u.Window >= u.WindowCount) return false;
+            for (int i = 0; i < u.BandCount; i++)
+                if (u.Band(i).Kind == BandKind.Remark && u.Band(i).Window == u.AppliedWindow) return true;
+            return false;
+        }
+
+        // The re-marking is still to come, so the new white markings are covered.
+        private static bool UpgradeRemarkPending(in UpgradeView u)
+        {
+            if (!u.Valid || u.Window >= u.WindowCount) return false;
+            for (int i = 0; i < u.BandCount; i++)
+                if (u.Band(i).Kind == BandKind.Remark && u.Band(i).Window > u.Window) return true;
+            return false;
+        }
+
+        private void ProcessUpgradeTempLines(EdgeCtx c, bool rebuild, bool bypass, bool tickOpen, ref bool wrote, ref bool deferred)
+        {
+            if (!c.UpgradeReady) return;   // waits with what is on screen
+            var es = c.Es;
+            var v = c.View;
+            var u = v.Upgrade;
+            var st = RRWSettings.Current;
+            Entity prefab = SurfaceState.Prefab(SurfaceLayer.TempMarking, 100);
+            string why = null;
+            if (!SurfacePalette.kTempMarkingOn || prefab == Entity.Null) why = "line clone not registered";
+            else if (st == null || !st.TempMarkingsOn) why = "setting TempMarkings off";
+            else if (!UpgradeRemarkPending(u)) why = "no covered markings";
+            else if (u.AppliedTraffic == BandTraffic.Carriageway || u.AppliedTraffic == BandTraffic.Half) why = "lanes closed";
+            else why = UpgradeLineSet(c);
+            float ls0 = 0f, ls1 = 0f, gs0 = 0f, gs1 = 0f;
+            float3 cutS = float3.zero, cutE = float3.zero;
+            bool rs = false, re = false;
+            if (why == null)
+            {
+                var span = new Span(math.min(v.Trim0, v.Trim1), math.max(v.Trim0, v.Trim1));
+                m_ProjSpan[(int)SurfaceLayer.TempMarking] = span;
+                if (!PhasePlan.ToEdgeLocal(span, c.Site.m_ChainU0, c.Site.m_ChainU1, c.L, out ls0, out ls1)) why = "no span on this edge";
+            }
+            if (why == null && !SurfaceGeom.GeometricRange(SurfaceLayer.TempMarking, ls0, ls1, c.L, es.Ends, out gs0, out gs1, out cutS, out cutE,
+                                                          out rs, out re, out _, out _))
+                why = "nothing left outside the junctions";
+            if (why != null)
+            {
+                es.TempReason = why;
+                if (es.TempRows.Count > 0) RemoveTempRows(es, why);
+                if (m_FrameLineWhy == null) m_FrameLineWhy = why;
+                return;
+            }
+            es.TempReason = "";
+            bool appear = es.TempRows.Count == 0;
+            int rows = m_UwLines.Count;
+            while (es.TempRows.Count > rows)
+            {
+                var last = es.TempRows[es.TempRows.Count - 1];
+                for (int k = 0; k < last.Pieces.Count; k++) { DeleteArea(last.Pieces[k]); SurfaceState.TempPieceDeletes++; }
+                es.TempRows.RemoveAt(es.TempRows.Count - 1);
+            }
+            float hw = math.max(0.02f, RRWGates.TempLineWidth) * 0.5f;
+            int pieces = 0;
+            for (int i = 0; i < rows; i++)
+            {
+                var line = m_UwLines[i];
+                float left = line.C - hw, right = line.C + hw;
+                TempRow row;
+                if (i < es.TempRows.Count) row = es.TempRows[i];
+                else
+                {
+                    row = new TempRow { Line = i, Sig = 0u };
+                    es.TempRows.Add(row);
+                }
+                if (row.Dashed != line.Dashed) row.Sig = 0u;
+                row.Line = i;
+                row.Dashed = line.Dashed;
+                uint sig = math.hash(new float4(left, right, c.Rec.GeometryRevision, 1f)) ^ (c.Es.Ends.Hash * 2654435761u) ^ (row.Dashed ? 0x9E3779B9u : 0u);
+                DesiredPieces(c, row.Dashed, ls0, ls1, gs0, gs1);
+                DiffRow(c, row, i, left, right, sig, prefab, appear, rebuild, bypass, tickOpen, cutS, cutE, rs, re, ref wrote, ref deferred);
+                pieces += row.Pieces.Count;
+            }
+            if (rows > 0)
+            {
+                m_FrameLineEdges++;
+                m_FrameLineRows += rows;
+                m_FrameLinePieces += pieces;
+            }
+        }
+
+        // m_UwLines for the edge (EDGE frame line centres). Null when there are lines, else why not.
+        private string UpgradeLineSet(EdgeCtx c)
+        {
+            m_UwLines.Clear();
+            m_UwLanes.Clear();
+            var cs = c.Ue.CrossSection;
+            var u = c.View.Upgrade;
+            int geo = c.Rec.GeometryRevision;
+            int open = 0;
+            for (int k = 0; k < cs.Count; k++)
+            {
+                var s = cs[k];
+                if (s.Kind != SubKind.DriveLane || s.Dir == 0) continue;
+                bool dropped = c.Ue.DroppedIn(geo, u, s.Lo, s.Hi, -1, false);
+                m_UwLanes.Add(new UwLane { Lo = s.Lo, Hi = s.Hi, Dir = s.Dir, Open = !dropped });
+                if (!dropped) open++;
+            }
+            if (open == 0) return "no lane open";
+            m_UwLanes.Sort((a, b) => a.Lo.CompareTo(b.Lo));
+            float hw = math.max(0.02f, RRWGates.TempLineWidth) * 0.5f;
+            float inset = RRWConst.kTempLineEdgeInset + hw;
+            for (int k = 0; k < m_UwLanes.Count; k++)
+            {
+                var a = m_UwLanes[k];
+                if (!a.Open) continue;
+                bool hasPrev = k > 0 && m_UwLanes[k - 1].Hi > a.Lo - 0.6f;
+                bool hasNext = k + 1 < m_UwLanes.Count && m_UwLanes[k + 1].Lo < a.Hi + 0.6f;
+                if (hasPrev && !m_UwLanes[k - 1].Open) m_UwLines.Add(new UwLine { C = a.Lo + inset });
+                if (!hasNext) continue;
+                var b = m_UwLanes[k + 1];
+                if (!b.Open) { m_UwLines.Add(new UwLine { C = a.Hi - inset }); continue; }
+                float x = (a.Hi + b.Lo) * 0.5f;
+                if (a.Dir == b.Dir) m_UwLines.Add(new UwLine { C = x, Dashed = true });
+                else if (RRWCity.NaTheme)
+                {
+                    m_UwLines.Add(new UwLine { C = x - RRWConst.kTempLineDividerOffset * 0.5f - hw });
+                    m_UwLines.Add(new UwLine { C = x + RRWConst.kTempLineDividerOffset * 0.5f + hw });
+                }
+                else m_UwLines.Add(new UwLine { C = x });
+            }
+            return m_UwLines.Count > 0 ? null : "no lane boundary to mark";
         }
 
         // m_Desired = the pieces of one row on this edge (edge-local s, geometric).

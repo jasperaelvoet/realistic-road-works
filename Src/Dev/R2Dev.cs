@@ -60,8 +60,11 @@ namespace RealisticRoadWorks.V3.DevCmds
             foreach (var p in SiteRegistry.Projects.Values)
             {
                 // M-open: no puppet in (or planned into) an open lane group
-                if (p.MachinesReportFresh(now) && (p.MachineZones & p.OpenLanes & RoadZones.AllLanes) != 0)
-                    problems.Add("p" + p.Id + " machines inside open lane group(s) " + Zones(p.MachineZones & p.OpenLanes) + " (M-open)");
+                // (mode H lane drops and switched-off new parking leave their groups open: a puppet on a ready drop lane or on a
+                // switched-off parking lane touches that group without being in traffic)
+                RoadZones inOpen = p.MachineZones & p.OpenLanes & RoadZones.AllLanes & ~UwCheck.MachineAllowance(p);
+                if (p.MachinesReportFresh(now) && inOpen != 0)
+                    problems.Add("p" + p.Id + " machines inside open lane group(s) " + Zones(inOpen) + " (M-open)");
 
                 // U3: a mode-A construction never carries traffic mid-works on its carriageway as a slow zone
                 if (p.Kind == WorksKind.Construction && p.Mode == VisualMode.FullDig && p.Phase != WorksPhase.Complete && !p.Releasing

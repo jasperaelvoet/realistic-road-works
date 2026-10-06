@@ -201,6 +201,10 @@ namespace RealisticRoadWorks.V3.Machines
                 }
                 else if (DigFloor.World(tv, slot, ub, lb, out float3 fw)) floorH = DigFloor.ObjH(fw, root, rot, arm.S);
                 float bite = !float.IsNaN(MachineDebug.DigBite) ? MachineDebug.DigBite : RRWConst.kDigBite;
+                // mode H band crews work a visible road: a surface scrape / break cycle at grade (no trench), dumping to the front
+                bool uw = p.Upgrade && p.UwBand >= 0;
+                float farShare = uw ? MxConst.kUwDragShare : 1f;
+                if (uw) bite = 0f;
                 float bite0 = mode == DigMode.Break ? 0f : bite;
                 // the truck: holds at its LoadAtFront stop (its Load DigHop leg and the Load hold after it) from the cycle start to the end
                 // of the shake, the same dig grid. Checked against the shake of the schedule the planner used for the
@@ -215,8 +219,14 @@ namespace RealisticRoadWorks.V3.Machines
                 bool haveTruck = false;
                 float tSlew = 0f, tR = 0f, tH = 0f, topW = float.NaN;
                 DigTruckBox box = default;
-                if (truck != null && TruckGeometry(em, truck, tv, start + 0.05, root, rot, arm, out box, out tSlew, out tR, out tH, out topW)) haveTruck = true;
+                if (truck != null && TruckGeometry(em, truck, tv, start + 0.05, root, rot, arm, out box, out tSlew, out tR, out tH, out topW, uw)) haveTruck = true;
                 else if (truck != null) { why = "truck pose unavailable"; truck = null; }
+                if (haveTruck && uw && math.abs(tSlew) > MxConst.kUwPlanSlewDeg)
+                {
+                    why = truck.Role + " outside the front dump (slew " + RRWLog.F(tSlew) + " deg)";
+                    haveTruck = false;
+                    truck = null;
+                }
                 DigKeys keys = null;
                 if (haveTruck)
                 {
@@ -224,7 +234,7 @@ namespace RealisticRoadWorks.V3.Machines
                     if (keys != null) d.Reuses++;
                     else
                     {
-                        keys = DigKeys.Build(arm, mode, floorH, gradeH, bite, 1f, true, tSlew, tR, tH, box, d.LastTruckFit);
+                        keys = DigKeys.Build(arm, mode, floorH, gradeH, bite, 1f, true, tSlew, tR, tH, box, d.LastTruckFit, farShare: farShare);
                         d.LastTruckFit = keys;
                         d.Builds++;
                         MxPerf.Count(MxC.DigCycleBuilds);
@@ -243,13 +253,13 @@ namespace RealisticRoadWorks.V3.Machines
                     bool sBox = false, outside = false;
                     DigTruckBox sb = default;
                     string swhy;
-                    if (provisional) { sSlew = (h.x >= 0f ? -1f : 1f) * 100f; swhy = "provisional"; }
-                    else SpoilTarget(em, p, d, tv, start, s, root, rot, h, mode, floorH, gradeH, bite, out sSlew, out sR, out sBox, out sb, out outside, out swhy);
+                    if (provisional) { sSlew = uw ? 0f : (h.x >= 0f ? -1f : 1f) * 100f; swhy = "provisional"; }
+                    else SpoilTarget(em, p, d, tv, start, s, root, rot, h, mode, floorH, gradeH, bite, out sSlew, out sR, out sBox, out sb, out outside, out swhy, uw);
                     keys = provisional ? null : Reuse(prev, mode, false, floorH, gradeH, bite0, sBox, sb, gradeH + 1f, sSlew, sR);
                     if (keys != null) d.Reuses++;
                     else
                     {
-                        keys = DigKeys.Build(arm, mode, floorH, gradeH, bite, sSlew, false, 0f, 0f, 0f, sb, d.LastSpoilFit, sSlew, sR, sBox);
+                        keys = DigKeys.Build(arm, mode, floorH, gradeH, bite, sSlew, false, 0f, 0f, 0f, sb, d.LastSpoilFit, sSlew, sR, sBox, farShare);
                         if (!provisional) d.LastSpoilFit = keys;
                         d.Builds++;
                         MxPerf.Count(MxC.DigCycleBuilds);
@@ -261,6 +271,7 @@ namespace RealisticRoadWorks.V3.Machines
                 }
                 keys.Provisional = provisional;
                 if (provisional) d.Provisionals++;
+                if (uw && !provisional) { if (haveTruck) MxUpgradeStats.FrontLoads++; else MxUpgradeStats.FrontDumpsSpoil++; }
                 keys.CycleStart = start;
                 keys.Truck = haveTruck ? truck : null;
                 keys.BedTopWorldY = haveTruck ? topW : float.NaN;
@@ -297,6 +308,7 @@ namespace RealisticRoadWorks.V3.Machines
         }
 
         private static readonly float[] s_SpoilSlews = { 100f, 85f, 70f, 55f, 40f, 25f, 10f, 0f };
+        private static readonly float[] s_FrontSlews = { 0f };
         private const float kSpoilEdge = 0.6f;       // the dump tip stays this far inside the lateral bounds (half a bucket)
         private const float kSpoilTruckClear = 1.5f; // ... and this far from a near truck's box
 
@@ -309,10 +321,10 @@ namespace RealisticRoadWorks.V3.Machines
         //  * The nearest near truck's box goes into the fit (hasBox): dump pick, DumpClearance and the swing / return lags keep clear of it.
         private void SpoilTarget(EntityManager em, Puppet p, DigState d, in TrackView tv, double start, in ChainState s, float3 root, quaternion rot,
                                  float2 h, DigMode mode, float floorH, float gradeH, float bite,
-                                 out float slew, out float r, out bool hasBox, out DigTruckBox box, out bool outside, out string why)
+                                 out float slew, out float r, out bool hasBox, out DigTruckBox box, out bool outside, out string why, bool front = false)
         {
             var arm = d.Arm;
-            DigKeys.SpoilReach(arm, mode, floorH, gradeH, bite, out float rDef, out float rMin, out float rFar);
+            DigKeys.SpoilReach(arm, mode, floorH, gradeH, bite, out float rDef, out float rMin, out float rFar, front ? MxConst.kUwDragShare : 1f);
             float bedH = gradeH + 1f;
             hasBox = false;
             box = default;
@@ -348,13 +360,15 @@ namespace RealisticRoadWorks.V3.Machines
             int truckSide = near > 0 && math.abs(sumX) > 0.3f ? (sumX > 0f ? 1 : -1) : 0;
             int pref = truckSide != 0 ? -truckSide : (h.x >= 0f ? -1 : 1);   // object -x = chain-left when facing +u
             TipBounds(em, p, s.U, start, out float lo, out float hi, out string bw);
+            // mode H: the front dump only (straight ahead, inside the band; the boom never swings over the open lanes)
+            var slews = front ? s_FrontSlews : s_SpoilSlews;
             for (int pass = 0; pass < 2; pass++)
             {
-                if (pass == 1 && near > 0) break;   // never towards a near truck
+                if (pass == 1 && (near > 0 || front)) break;   // never towards a near truck
                 int sg = pass == 0 ? pref : -pref;
-                for (int ia = 0; ia < s_SpoilSlews.Length; ia++)
+                for (int ia = 0; ia < slews.Length; ia++)
                 {
-                    float th = s_SpoilSlews[ia];
+                    float th = slews[ia];
                     for (int ir = 0; ir < 12; ir++)
                     {
                         float rr = math.max(rMin, rDef - 0.5f * ir);
@@ -457,7 +471,7 @@ namespace RealisticRoadWorks.V3.Machines
 
         // The truck at machine time tAt as a box in the excavator's object space + its bed point in arm space (slew, r, top + 0.45 m).
         private bool TruckGeometry(EntityManager em, Puppet t, in TrackView tv, double tAt, float3 root, quaternion rot, DigArm arm,
-                                   out DigTruckBox box, out float slew, out float r, out float h, out float topW)
+                                   out DigTruckBox box, out float slew, out float r, out float h, out float topW, bool tail = false)
         {
             box = default; slew = r = h = 0f; topW = float.NaN;
             MachineMotion.State(t.Plan, MachineRegistry.Clock, tAt, out var ts);
@@ -475,7 +489,9 @@ namespace RealisticRoadWorks.V3.Machines
                 Ax = math.normalizesafe(ax, new float3(1f, 0f, 0f)), Az = math.normalizesafe(az, new float3(0f, 0f, 1f)),
                 Hx = 0.5f * (g.Max.x - g.Min.x), Hz = 0.5f * (g.Max.z - g.Min.z), Y0 = baseY + g.Min.y, Y1 = baseY + g.Max.y,
             };
-            float3 bedW = tp + math.rotate(trot, g.Bed);
+            var bed = g.Bed;
+            if (tail) bed.z = g.Min.z + MxConst.kUwTailgateInset;   // front loading: the bucket empties just inside the tailgate
+            float3 bedW = tp + math.rotate(trot, bed);
             topW = tp.y + g.Top;
             arm.ObjToArm(math.rotate(inv, bedW - root), out slew, out r, out _);
             // the bed top in the arm's h axis (object space), not a world-Y difference (the rig rolls / pitches)

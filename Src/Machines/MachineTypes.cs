@@ -94,11 +94,28 @@ namespace RealisticRoadWorks.V3.Machines
         public float Floor;               // C4 front floor without the swap (StageContext.FrontFloor; 0 = none)
         public byte Crews, Crew;          // section `Crew` of `Crews` (0/1 crews = the whole chain):
                                           // F = PhasePlan.SectionFront(Phase, f, U, Crews, Crew, Swap, Floor)
+        // Upgrade works (mode H): the front of one band crew. Phase / PStart / PEnd are the band's equivalent phase mapped onto
+        // project progress (the band's own progress runs linearly over its window), U the length it sweeps and Base where it
+        // starts (the trimmed chain start; 0 for the re-marking band under Half, which uses the C4 fronts over the chain).
+        // PMin: progress below the band's window start does not count (the band waits at its start progress there).
+        public byte Upgrade;              // 1 = mode H band front: F = Base + PhasePlan.MainFront(Phase, f, U, Swap, Floor)
+        public float Base;
+        public float PMin;
+        // Mode H re-marking band under Half with the side swap: the half the crew paints, as the Director's stage says
+        // (1 = first half, 2 = second half; 0 = taken from f). The sweep of that half is used whatever f the progress model
+        // gives, so the front never jumps between the halves inside a leg when the model's f and the Director's swap point
+        // disagree by a few frames (the stage change re-plans the crew instead).
+        public byte C4Stage;
 
         public readonly bool SameAs(in FrontRef o) =>
             Phase == o.Phase && PStart == o.PStart && PEnd == o.PEnd && U == o.U && Swap == o.Swap && Floor == o.Floor &&
-            Crews == o.Crews && Crew == o.Crew &&
+            Crews == o.Crews && Crew == o.Crew && Upgrade == o.Upgrade && Base == o.Base && PMin == o.PMin && C4Stage == o.C4Stage &&
             Model.P0 == o.Model.P0 && Model.Frame0 == o.Model.Frame0 && Model.PPerFrame == o.Model.PPerFrame;
+
+        // The parts of a mode H band front a plan depends on (another phase or band of the crew, or the half it paints, re-plans it).
+        public readonly bool SameUpgradeBand(in FrontRef o) =>
+            Upgrade == o.Upgrade && Phase == o.Phase && PStart == o.PStart && PEnd == o.PEnd && U == o.U && Base == o.Base && PMin == o.PMin &&
+            C4Stage == o.C4Stage;
     }
 
     // Machine clock: tau = Tau0 + (frame - Frame0 + frac) / 60 * Scale. Re-anchored when Scale changes,
@@ -317,6 +334,11 @@ namespace RealisticRoadWorks.V3.Machines
         public const float kGuardCell = 32f;            // separation guard broad phase: world grid cell (m)
         public const float kMonSpeedWindow = 0.1f;      // rrw.mx.check speed invariant: chord window (machine s)
         public const float kMonAccelWindow = 0.25f;     // ... acceleration: change of the signed speed over this window
+        // Runaway guard: a speed above this x the fastest the role may ever move (forward, reverse or leaving) is never real motion
+        // but a jump in a plan. Such a speed is not carried into the next plan (velocity match, brake leg), and a puppet seen
+        // moving that fast stops where it is and plans again from rest. Planned legs stay below kSpeedMargin x the limit, so
+        // correct plans never come near it.
+        public const float kRunawayFactor = 1.5f;
 
         // ---- road rollers and IK digging
         // Bucket tip calibration of the "RRW Road Excavator" rig (verified in game with reachedErr 0.000 and a
@@ -367,11 +389,24 @@ namespace RealisticRoadWorks.V3.Machines
         public const float kInlineClear = 1.0f;         // narrow sites: gap between the excavator's and the inline truck's TRUE boxes (2 x planner margin + 0.3)
         public const int kInlineRoomCycles = 240;       // dig cycles searched ahead for room behind a clamped excavator (narrow inline loading)
         public const float kExitParkRemoveSeconds = 3f; // a leaver standing at its CONNECTED exit (first in the queue) is removed this long after it stopped
+        public const float kUwRollerLeaveSeconds = 40f; // a leaving roller of upgrade works is removed at the latest this long after it began leaving
+                                                        // (machine s, even in view), or kExitParkRemoveSeconds after its drive-off stopped
         public const float kExitReach = 30f;            // ... "at its exit": its final stop within this of the exit end
         public const float kLeadEndSeconds = 20f;       // a leading C4 crew truck that cannot stay ahead to the end drives off this long before
         public const float kSpawnPathHorizon = 90f;     // s of its own crew's path owner's path a spawn spot stays out of (InWorkPath horizon)
         public const float kSpawnPathHorizonOther = 20f;// ... of another crew's path owner (the new machine leaves its spawn spot within seconds)
         public const float kLeaveTurnSearch = 24f;      // m searched towards the exit for a compact K-turn spot (leavers, no standard K-turn)
         public static readonly float[] kLeaveTurnRadii = { 5f, 4f, 3.5f, 3f, 2.5f, 2f };   // compact K-turn radii tried, largest first
+
+        // ---- upgrade works (mode H): machines beside traffic, band by band
+        // The excavator digs and dumps to the front: the dump slew the planner allows for (an inline truck on a curved band). It stays
+        // well inside RRWConst.kUwSlewLimitDeg; the box clearance takes the swept house at this slew into account.
+        public const float kUwPlanSlewDeg = 5f;
+        public const float kUwDragShare = 0.7f;         // the scrape at grade drags from this share of the far reach (room for the truck's tail)
+        public const float kUwTailgateInset = 0.8f;     // front loading: the bucket empties this far inside the truck bed's rear end
+        public const float kUwTruckTailGap = 0.5f;      // front loading: the truck's tail stands this far beyond the scrape's far end
+        public const float kUwVacateTol = 0.05f;        // a box this far over the machine-safe run vacates the band
+        public const float kUwKeepOutMargin = 0.3f;     // standing boxes keep this much off a driveway keep-out window along the road
+        public const float kUwKeepOutSearch = 30f;      // m searched along the road for a standing spot outside the keep-outs
     }
 }

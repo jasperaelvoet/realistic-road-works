@@ -13,7 +13,8 @@ namespace RealisticRoadWorks.V3.Persistence
         public string Name => "rrw.save.scan";
         public string Help => "rrw.save.scan [now] - dry run of SaveSanitize (icons, RRWDerived / puppet descendants without LivePath, v2 leftovers) + "
                               + "lane counters: load snapshot (Forbidden / blockage / RRW restriction refs before Traffic re-applies), last save audit, modes; now = scan lanes now; "
-                              + "dust puffs (live, oldest age, LivePath, Owner) and RRW_Roller_* GameObjects now / at the last load";
+                              + "dust puffs (live, oldest age, LivePath, Owner) and RRW_Roller_* GameObjects now / at the last load; "
+                              + "upgrade tails now / at the last save / at the last load (a reload of the last save shows the same hash) and mode H drop lanes";
         public void Run(DevContext ctx, string[] args)
         {
             var scan = SaveSanitizeSystem.Scan;
@@ -34,7 +35,7 @@ namespace RealisticRoadWorks.V3.Persistence
                 ctx.Log("rrw save scan load@" + LaneScan.LoadUpdate + " city  " + LaneScan.LoadCity.Text()
                         + (LaneScan.LoadCity.RrwRefs + LaneScan.LoadWorks.RrwRefs == 0 ? " rrwRefs=0 ok" : " RRW REFS SURVIVED THE SAVE (FAIL)"));
                 ctx.Log("rrw save scan load modes sites=" + LaneScan.LoadSites + " A=" + LaneScan.LoadModeA + " H=" + LaneScan.LoadModeH
-                        + "(reserved mode, run as D) D=" + LaneScan.LoadModeD + " unknown=" + LaneScan.LoadModeUnknown + " incompatible=" + LaneScan.LoadIncompatible);
+                        + "(upgrade " + LaneScan.LoadUpgrade + ") D=" + LaneScan.LoadModeD + " unknown=" + LaneScan.LoadModeUnknown + " incompatible=" + LaneScan.LoadIncompatible);
             }
             else ctx.Log("rrw save scan load: no snapshot since the last load (taken in the first game update after a load)");
 
@@ -43,6 +44,38 @@ namespace RealisticRoadWorks.V3.Persistence
                         + " | registry closedB=" + LaneScan.AuditClosedBEdges + " soft=" + LaneScan.AuditSoftEdges + " halfOpen=" + LaneScan.AuditOpenEdges
                         + (LaneScan.AuditWorks.RrwRefs == 0 && (LaneScan.AuditWorks.Blocked == 0 || LaneScan.AuditClosedBEdges == 0) ? " ok" : " FAIL"));
             else ctx.Log("rrw save scan last save audit: no save since the last load");
+
+            // Upgrade tails (mode H): counts and one hash over every tail without its progress, now (what a save would write), at the last
+            // save and at the last load. A reload of the last save shows the same hash at load; "now" moves on as windows start.
+            {
+                var q = ctx.EntityManager.CreateEntityQuery(new EntityQueryDesc
+                {
+                    All = new[] { ComponentType.ReadOnly<RoadWorksSite>() },
+                    None = new[] { ComponentType.ReadOnly<Game.Tools.Temp>() },
+                });
+                var bad = new List<Entity>();
+                var tNow = UpgradeTails.Take(q, false, bad);
+                q.Dispose();
+                ctx.Log("rrw save scan tails now " + tNow.Text() + (tNow.Invalid + tNow.HalfNoPlan + tNow.HalfOther == 0 ? " ok" : " FAIL edges " + LaneScan.Edges(bad)));
+                ctx.Log("rrw save scan tails last save " + (UpgradeTails.LastSave.Taken ? UpgradeTails.LastSave.Text() + " (" + UpgradeTails.LastSave.When + ")" : "none in this session"));
+                if (UpgradeTails.Load.Taken)
+                {
+                    string cmp = UpgradeTails.CompareWithLastSave(UpgradeTails.Load);
+                    ctx.Log("rrw save scan tails load " + UpgradeTails.Load.Text() + " olderResaveH=" + LaneScan.LoadHalfNoPlan + " badTail=" + LaneScan.LoadBadTail
+                            + (cmp.Length > 0 ? " | " + cmp : ""));
+                }
+                else ctx.Log("rrw save scan tails load: no load census since the last load");
+            }
+
+            // Mode H drop lanes (Traffic's lane blockers): live values now and at the last save audit
+            {
+                var de = new List<Entity>();
+                LaneScan.DropLanes(ctx.EntityManager, out int dl, out int db, out int df, out int dEdges, de);
+                ctx.Log("rrw save scan drops now lanes=" + dl + " edges=" + dEdges + " blocked=" + db + " forbidden=" + df + " visualDropUsed=" + LaneScan.VisualDropEverOn
+                        + " (live: blockers applied) | last save audit lanes=" + LaneScan.AuditDropLanes + " blocked=" + LaneScan.AuditDropBlocked
+                        + " forbidden=" + LaneScan.AuditDropForbidden
+                        + (!LaneScan.AuditTaken ? " (no save yet)" : LaneScan.AuditDropBlocked == 0 && (!LaneScan.VisualDropEverOn || LaneScan.AuditDropForbidden == 0) ? " ok" : " FAIL"));
+            }
 
             bool now = args.Length > 0 && args[0].Equals("now", System.StringComparison.OrdinalIgnoreCase);
             if (!now) return;

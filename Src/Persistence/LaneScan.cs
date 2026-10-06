@@ -26,6 +26,10 @@ namespace RealisticRoadWorks.V3.Persistence
     //   Dangling    an access restriction that points at an entity that does not exist (a sentinel ref that survived a load)
     //   ParkDisabled ParkingLane ParkingDisabled (vanilla recomputes it in ParkingLaneDataSystem; verified in game)
     // Persistence never writes lanes (Traffic owns the save guard); these counts only verify it.
+    // Upgrade works (mode H) add the lanes Traffic drops with lane blockers (UpgradeEdgeState.DropLanes): the blockage the blockers
+    // cause is serialized in CarLane like CLOSED-B, so Traffic's save guard must neutralise it before SerializerSystem, and the
+    // pre-serialize audit counts what is left on those lanes. Forbidden on drop lanes is only ours when the soft visual drop
+    // (RRWGates.UpgradeVisualDrop) was on at some point in this session; otherwise it is vanilla's and only counted.
     internal struct LaneScanCounts
     {
         public int Edges, CarLanes, Forbidden, Blocked, Sentinel, Dangling;
@@ -46,11 +50,18 @@ namespace RealisticRoadWorks.V3.Persistence
         public static LaneScanCounts LoadWorks, LoadCity;
         public static uint LoadUpdate;
         public static int LoadSites, LoadModeA, LoadModeH, LoadModeD, LoadModeUnknown, LoadIncompatible;
+        // upgrade tails at load: plan kinds, mode 2 sites without a plan (3.0.0 resaves, now mode D), tails dropped by validation
+        public static int LoadUpgrade, LoadReconstruction, LoadHalfNoPlan, LoadBadTail;
         // Last pre-serialize audit (SaveLaneAuditSystem, after Traffic's save guard).
         public static bool AuditTaken;
         public static LaneScanCounts AuditWorks;
         public static int AuditClosedBEdges, AuditSoftEdges, AuditOpenEdges;
         public static string AuditWhen = "never";
+        // Mode H drop lanes at the last audit: lanes listed by Traffic, still blocked / Forbidden after its save guard, their edges.
+        public static int AuditDropLanes, AuditDropBlocked, AuditDropForbidden, AuditDropEdges;
+        // The soft visual drop (Forbidden on band lanes) was switched on at some point in this session (LegacyMigrationSystem samples
+        // the gate every update; never reset): only then is Forbidden on a drop lane ours.
+        public static bool VisualDropEverOn;
 
         public static void ResetForLoad()
         {
@@ -58,13 +69,15 @@ namespace RealisticRoadWorks.V3.Persistence
             LoadWorks = LoadCity = default;
             LoadUpdate = 0;
             LoadSites = LoadModeA = LoadModeH = LoadModeD = LoadModeUnknown = LoadIncompatible = 0;
+            LoadUpgrade = LoadReconstruction = LoadHalfNoPlan = LoadBadTail = 0;
             AuditTaken = false;
             AuditWorks = default;
             AuditClosedBEdges = AuditSoftEdges = AuditOpenEdges = 0;
+            AuditDropLanes = AuditDropBlocked = AuditDropForbidden = AuditDropEdges = 0;
             AuditWhen = "never";
         }
 
-        // A saved VisualMode value this build accepts (2 = HalfWidth is valid; this version treats it like Minimal).
+        // A saved VisualMode value this build accepts (2 = HalfWidth: upgrade works).
         public static bool ModeValid(VisualMode m) => m == VisualMode.FullDig || m == VisualMode.HalfWidth || m == VisualMode.Minimal;
 
         private static int RestrictionKind(EntityManager em, Entity r)
@@ -101,6 +114,30 @@ namespace RealisticRoadWorks.V3.Persistence
                 c.ParkingLanes++;
                 if ((pl.m_Flags & ParkingLaneFlags.ParkingDisabled) != 0) c.ParkDisabled++;
                 if (RestrictionKind(em, pl.m_AccessRestriction) != 0) c.ParkSentinel++;
+            }
+        }
+
+        // Mode H drop lanes (every registry edge's UpgradeEdgeState.DropLanes, Traffic's list): how many still carry a blockage /
+        // Forbidden right now. edgeOut (optional) receives the edges with such a lane (max 16).
+        public static void DropLanes(EntityManager em, out int lanes, out int blocked, out int forbidden, out int edges, List<Entity> edgeOut = null)
+        {
+            lanes = blocked = forbidden = edges = 0;
+            foreach (var er in SiteRegistry.Edges.Values)
+            {
+                var es = er.Upgrade;
+                if (es == null || es.DropLanes.Count == 0) continue;
+                edges++;
+                int before = blocked + forbidden;
+                for (int i = 0; i < es.DropLanes.Count; i++)
+                {
+                    Entity lane = es.DropLanes[i];
+                    if (lane == Entity.Null || !em.Exists(lane) || !em.HasComponent<NetCarLane>(lane)) continue;
+                    var cl = em.GetComponentData<NetCarLane>(lane);
+                    lanes++;
+                    if (cl.m_BlockageEnd >= cl.m_BlockageStart) blocked++;
+                    if ((cl.m_Flags & CarLaneFlags.Forbidden) != 0) forbidden++;
+                }
+                if (edgeOut != null && edgeOut.Count < 16 && blocked + forbidden > before) edgeOut.Add(er.Edge);
             }
         }
 
@@ -179,6 +216,7 @@ namespace RealisticRoadWorks.V3.Persistence
         public static void ModeCensus(EntityManager em, EntityQuery sites)
         {
             LoadSites = LoadModeA = LoadModeH = LoadModeD = LoadModeUnknown = LoadIncompatible = 0;
+            LoadUpgrade = LoadReconstruction = LoadHalfNoPlan = LoadBadTail = 0;
             if (sites.IsEmptyIgnoreFilter) return;
             var arr = sites.ToComponentDataArray<RoadWorksSite>(Allocator.Temp);
             try
@@ -194,6 +232,10 @@ namespace RealisticRoadWorks.V3.Persistence
                         default: LoadModeUnknown++; break;
                     }
                     if (arr[i].Has(SiteFlags.Incompatible)) LoadIncompatible++;
+                    if (arr[i].Plan == PlanKind.Upgrade) LoadUpgrade++;
+                    else if (arr[i].Plan == PlanKind.Reconstruction) LoadReconstruction++;
+                    if (arr[i].m_LoadNote == RoadWorksSite.kNoteHalfWidthNoPlan) LoadHalfNoPlan++;
+                    else if (arr[i].m_LoadNote == RoadWorksSite.kNoteBadTail) LoadBadTail++;
                 }
             }
             finally { arr.Dispose(); }
@@ -210,16 +252,31 @@ namespace RealisticRoadWorks.V3.Persistence
             LoadCity = City(em, city);   // every road lane: dev builds only (to compare a mod-less save with a vanilla control)
 #endif
             ModeCensus(em, sites);
+            // the tail census was taken at load completion (before any system changed a site); without it (should not happen), now
+            if (!UpgradeTails.Load.Taken) UpgradeTails.Load = UpgradeTails.Take(sites, true, UpgradeTails.LoadBadTails);
+            var badTails = UpgradeTails.LoadBadTails;
             LoadUpdate = RRWClock.UpdateIndex;
             LoadTaken = true;
             string msg = "persistence: load lane snapshot (before Traffic re-applies) works " + LoadWorks.Text() + " | city " + (LoadCity.Edges > 0 ? LoadCity.Text() : "(dev builds only)")
-                         + " | sites=" + LoadSites + " modeA=" + LoadModeA + " modeH=" + LoadModeH + "(Wave 2 save, run as mode D)"
-                         + " modeD=" + LoadModeD + " modeUnknown=" + LoadModeUnknown + " incompatible=" + LoadIncompatible;
+                         + " | sites=" + LoadSites + " modeA=" + LoadModeA + " modeH=" + LoadModeH + "(upgrade=" + LoadUpgrade + " reconstruction="
+                         + LoadReconstruction + ")"
+                         + " modeD=" + LoadModeD + " modeUnknown=" + LoadModeUnknown + " incompatible=" + LoadIncompatible
+                         + " olderResaveH=" + LoadHalfNoPlan + " badTail=" + LoadBadTail;
             if (LoadCity.RrwRefs > 0 || LoadWorks.RrwRefs > 0)
-                RRWLog.Warn(msg + " -- RRW restriction refs survived the save (E10 FAIL?): edges " + Edges(city.Count > 0 ? city : works));
+                RRWLog.Warn(msg + " -- RRW restriction refs survived the save: edges " + Edges(city.Count > 0 ? city : works));
             else RRWLog.Info(msg + (LoadCity.Blocked + LoadWorks.Blocked > 0 ? " (blocked edges " + Edges(city.Count > 0 ? city : works) + ")" : ""));
             if (LoadModeUnknown > 0)
                 RRWLog.Warn("persistence: " + LoadModeUnknown + " saved sites carry an unknown VisualMode (not 0/2/3); modules run them as mode D");
+            if (LoadHalfNoPlan > 0)
+                RRWLog.Info("persistence: " + LoadHalfNoPlan + " saved mode 2 sites without an upgrade plan (saved by an older version): run as mode D, finished as saved");
+            if (LoadBadTail > 0)
+                RRWLog.Warn("persistence: " + LoadBadTail + " saved upgrade plans failed validation and were dropped: those sites run as mode D, finished as saved (edges "
+                            + Edges(badTails) + ")");
+            if (UpgradeTails.Load.Tails > 0 || UpgradeTails.LastSave.Taken)
+            {
+                string cmp = UpgradeTails.CompareWithLastSave(UpgradeTails.Load);
+                RRWLog.Info("persistence: upgrade " + UpgradeTails.Load.Text() + (cmp.Length > 0 ? " (" + cmp + ")" : ""));
+            }
         }
 
         public static string Edges(List<Entity> l)
@@ -241,6 +298,7 @@ namespace RealisticRoadWorks.V3.Persistence
         public const int kOrder = RRWOrder.SaveLaneAudit;   // after the Traffic save guard (905), before SaveRestore (910)
         private readonly RRWGuard m_Guard = new RRWGuard("persistence SaveLaneAudit");
         private readonly List<Entity> m_Edges = new List<Entity>();
+        private readonly List<Entity> m_DropEdges = new List<Entity>();
 
         protected override void OnUpdate()
         {
@@ -258,6 +316,12 @@ namespace RealisticRoadWorks.V3.Persistence
                     if (er.SoftApplied != RoadZones.None) soft++;
                     if (er.OpenLanesApplied != RoadZones.None) open++;
                 }
+                m_DropEdges.Clear();
+                LaneScan.DropLanes(EntityManager, out int dropLanes, out int dropBlocked, out int dropForbidden, out int dropEdges, m_DropEdges);
+                LaneScan.AuditDropLanes = dropLanes;
+                LaneScan.AuditDropBlocked = dropBlocked;
+                LaneScan.AuditDropForbidden = dropForbidden;
+                LaneScan.AuditDropEdges = dropEdges;
                 LaneScan.AuditWorks = c;
                 LaneScan.AuditClosedBEdges = closedB;
                 LaneScan.AuditSoftEdges = soft;
@@ -265,11 +329,18 @@ namespace RealisticRoadWorks.V3.Persistence
                 LaneScan.AuditTaken = true;
                 LaneScan.AuditWhen = "update " + RRWClock.UpdateIndex + " sim " + RRWClock.SimFrame;
                 string msg = "persistence: save lane audit (after the Traffic save guard) works " + c.Text()
-                             + " | registry edges closedB=" + closedB + " soft=" + soft + " halfOpen=" + open + " gates soft=" + RRWGates.Soft + " closedb=" + RRWGates.ClosedB;
+                             + " | registry edges closedB=" + closedB + " soft=" + soft + " halfOpen=" + open + " gates soft=" + RRWGates.Soft + " closedb=" + RRWGates.ClosedB
+                             + " | upgrade drop lanes=" + dropLanes + " (edges " + dropEdges + ") blocked=" + dropBlocked + " forbidden=" + dropForbidden
+                             + (LaneScan.VisualDropEverOn ? " (visual drop used this session)" : "");
                 // A sentinel / dangling ref must never be written. Blockage on a works edge is a CLOSED-B the guard missed when
-                // Traffic reports CLOSED-B groups (else it is a vanilla accident, logged only).
+                // Traffic reports CLOSED-B groups (else it is a vanilla accident, logged only). A drop lane that is still blocked
+                // after the guard carries our blockers' value (or, rarely, an accident); Forbidden on it is ours only when the visual
+                // drop was used.
+                bool dropLeft = dropBlocked > 0 || (dropForbidden > 0 && LaneScan.VisualDropEverOn);
                 if (c.RrwRefs > 0 || (c.Blocked > 0 && closedB > 0))
-                    RRWLog.Warn(msg + " -- closure state would be SAVED on edges " + LaneScan.Edges(m_Edges) + " (Traffic save guard, E10)");
+                    RRWLog.Warn(msg + " -- closure state would be SAVED on edges " + LaneScan.Edges(m_Edges) + " (Traffic save guard)");
+                else if (dropLeft)
+                    RRWLog.Warn(msg + " -- lane drop values would be SAVED on edges " + LaneScan.Edges(m_DropEdges) + " (Traffic save guard for lane blockers)");
                 else RRWLog.Info(msg);
                 m_Guard.Ok();
             }

@@ -73,8 +73,10 @@ namespace RealisticRoadWorks.V3.Persistence
                     SaveGuard.Pending.Add(e);
                 }
                 SaveGuard.PendingFrame = UnityEngine.Time.frameCount;
+                var tails = SaveTails();
                 string msg = "persistence: save sanitize icons=" + counts.Icons + " derivedNoLivePath=" + counts.Derived
-                             + " descendantsNoLivePath=" + counts.Descendants + " works edges=" + SiteRegistry.Edges.Count;
+                             + " descendantsNoLivePath=" + counts.Descendants + " works edges=" + SiteRegistry.Edges.Count
+                             + " upgrade " + tails.Text();
                 if (counts.Derived + counts.Descendants > 0) RRWLog.Warn(msg + " (derived entities without LivePath were kept out of the save)");
                 else RRWLog.Info(msg);
                 m_Guard.Ok();
@@ -88,6 +90,28 @@ namespace RealisticRoadWorks.V3.Persistence
                 RRWPerf.Stop(PerfSlot.Persistence, t0);
             }
         }
+
+        // The upgrade tails this save writes (UpgradeTails.LastSave, compared with the next load). The serializer writes every mode 2
+        // construction as finished in its v1 fields; a tail that fails validation is still written and dropped by the reader (the
+        // site then finishes as mode D), and a plan-less mode 2 construction finishes the same way. Both are logged once per save.
+        private TailCensus SaveTails()
+        {
+            var bad = m_TailEdges;
+            var noPlan = m_NoPlanEdges;
+            var c = UpgradeTails.Take(m_Sites, false, bad, noPlan);
+            UpgradeTails.LastSave = c;
+            if (c.Invalid > 0)
+                RRWLog.Warn("persistence: " + c.Invalid + " upgrade plans fail validation and are written anyway: the next load drops them and those sites "
+                            + "finish as mode D (edges " + LaneScan.Edges(bad) + ")");
+            if (c.HalfNoPlan > 0)
+                RRWLog.Warn("persistence: " + c.HalfNoPlan + " mode 2 constructions without an upgrade plan are written as finished (edges " + LaneScan.Edges(noPlan) + ")");
+            if (c.HalfOther > 0)
+                RRWLog.Warn("persistence: " + c.HalfOther + " mode 2 sites are not constructions (a cancelled upgrade site?): they reload as mode D");
+            return c;
+        }
+
+        private readonly List<Entity> m_TailEdges = new List<Entity>(8);
+        private readonly List<Entity> m_NoPlanEdges = new List<Entity>(8);
 
         private Entity IconPrefab(string name)
         {
@@ -106,11 +130,11 @@ namespace RealisticRoadWorks.V3.Persistence
             if (noEdge > 0) problems.Add("persistence: " + noEdge + " RoadWorksSite on entities without Edge");
             if (LegacyMigrationSystem.LegacyLeft > 0) problems.Add("persistence: " + LegacyMigrationSystem.LegacyLeft + " v2 components left after migration");
             if (SaveGuard.Pending.Count > 0) problems.Add("persistence: save guard still holds " + SaveGuard.Pending.Count + " Temp-marked entities");
-            // Saved modes 0 / 2 / 3 are valid; mode 2 (HalfWidth, reserved for a later version) must never be marked Incompatible.
+            // Saved modes 0 / 2 / 3 are valid; mode 2 (HalfWidth: upgrade works) must never be marked Incompatible.
             if (!m_Sites.IsEmptyIgnoreFilter)
             {
                 var arr = m_Sites.ToComponentDataArray<RoadWorksSite>(Unity.Collections.Allocator.Temp);
-                int unknown = 0, halfIncompatible = 0, crewsNoCancel = 0, crewsMixed = 0;
+                int unknown = 0, halfIncompatible = 0, crewsNoCancel = 0, crewsMixed = 0, halfNoPlan = 0, planNotHalf = 0, badTail = 0;
                 // SiteFlags bits 9-11 (CancelCrewsMask) hold the crew count of a CANCELLED construction; they are
                 // valid saved bits (never Incompatible), meaningful only with CancelledBuild and identical on every edge of a project.
                 Dictionary<uint, SiteFlags> cancelCrews = null;
@@ -118,6 +142,11 @@ namespace RealisticRoadWorks.V3.Persistence
                 {
                     if (!LaneScan.ModeValid(arr[i].Mode)) unknown++;
                     else if (arr[i].Mode == VisualMode.HalfWidth && arr[i].Has(SiteFlags.Incompatible)) halfIncompatible++;
+                    // upgrade tails: mode 2 always carries a plan kind (the reader turns plan-less mode 2 sites into mode D), a plan
+                    // kind only on a mode 2 construction (the only site whose tail is written), and the tail is consistent
+                    if (arr[i].Mode == VisualMode.HalfWidth && arr[i].Plan == PlanKind.None) halfNoPlan++;
+                    else if (arr[i].Plan != PlanKind.None && !arr[i].WritesTail) planNotHalf++;
+                    else if (!arr[i].TailValid()) badTail++;
                     SiteFlags cc = arr[i].Flags & SiteFlags.CancelCrewsMask;
                     if (cc != SiteFlags.None && !arr[i].Has(SiteFlags.CancelledBuild)) crewsNoCancel++;
                     if (arr[i].m_ProjectId == 0) continue;
@@ -129,13 +158,22 @@ namespace RealisticRoadWorks.V3.Persistence
                 if (unknown > 0) problems.Add("persistence: " + unknown + " saved sites with an unknown VisualMode (valid: 0 FullDig, 2 HalfWidth, 3 Minimal)");
                 if (halfIncompatible > 0) problems.Add("persistence: " + halfIncompatible + " HalfWidth (mode 2) sites marked Incompatible (mode 2 is valid)");
                 if (crewsNoCancel > 0) problems.Add("persistence: " + crewsNoCancel + " saved sites carry cancel crew bits (SiteFlags 9-11) without CancelledBuild (Tools / Director must drop them together)");
+                if (halfNoPlan > 0) problems.Add("persistence: " + halfNoPlan + " mode 2 (HalfWidth) sites without an upgrade plan (a save writes the constructions among them as finished; they reload as mode D)");
+                if (planNotHalf > 0) problems.Add("persistence: " + planNotHalf + " sites carry an upgrade plan but are not mode 2 constructions (a save drops the plan)");
+                if (badTail > 0) problems.Add("persistence: " + badTail + " upgrade plans fail validation (would be dropped on load)");
                 if (crewsMixed > 0) problems.Add("persistence: " + crewsMixed + " saved sites disagree with their project's cancel crew count (SiteFlags 9-11)");
             }
             // Save safety: an RRW restriction ref that survived the last load / would be written by the last save.
             if (LaneScan.LoadTaken && LaneScan.LoadCity.RrwRefs + LaneScan.LoadWorks.RrwRefs > 0)
-                problems.Add("persistence: the last load brought " + (LaneScan.LoadCity.RrwRefs + LaneScan.LoadWorks.RrwRefs) + " RRW access-restriction refs (sentinel/dangling) out of the save (E10)");
+                problems.Add("persistence: the last load brought " + (LaneScan.LoadCity.RrwRefs + LaneScan.LoadWorks.RrwRefs) + " RRW access-restriction refs (sentinel/dangling) out of the save");
             if (LaneScan.AuditTaken && LaneScan.AuditWorks.RrwRefs > 0)
-                problems.Add("persistence: the last save wrote " + LaneScan.AuditWorks.RrwRefs + " RRW access-restriction refs on works lanes (" + LaneScan.AuditWhen + ", E10)");
+                problems.Add("persistence: the last save wrote " + LaneScan.AuditWorks.RrwRefs + " RRW access-restriction refs on works lanes (" + LaneScan.AuditWhen + ")");
+            // Upgrade works: the lane values our lane blockers cause (blockage; Forbidden of the soft visual drop) never reach a save.
+            if (LaneScan.AuditTaken && LaneScan.AuditDropBlocked > 0)
+                problems.Add("persistence: the last save wrote " + LaneScan.AuditDropBlocked + " blocked mode H drop lanes (" + LaneScan.AuditWhen
+                             + "; Traffic's save guard must neutralise the blockers' lane values)");
+            if (LaneScan.AuditTaken && LaneScan.VisualDropEverOn && LaneScan.AuditDropForbidden > 0)
+                problems.Add("persistence: the last save wrote " + LaneScan.AuditDropForbidden + " Forbidden mode H drop lanes while the visual drop was in use (" + LaneScan.AuditWhen + ")");
             // Pause works was removed; the Director clears the old bit on its first-frame rebuild.
             if (SiteRegistry.Loaded)
             {
@@ -152,8 +190,12 @@ namespace RealisticRoadWorks.V3.Persistence
         {
             if (!em.Exists(edge) || !em.HasComponent<RoadWorksSite>(edge)) return null;
             var s = em.GetComponentData<RoadWorksSite>(edge);
-            return "saved v" + RoadWorksSite.kVersion + "/" + RoadWorksSite.kPayloadV1 + "B mode=" + s.Mode
-                   + (s.Mode == VisualMode.HalfWidth ? "(Wave 2, run as D)" : LaneScan.ModeValid(s.Mode) ? "" : "(UNKNOWN)")
+            return "saved v" + RoadWorksSite.kVersion + "/" + RoadWorksSite.kPayloadV2 + "B mode=" + s.Mode
+                   + (s.Plan != PlanKind.None ? " plan=" + s.Plan + " class=" + s.UpClass + " bands=" + s.m_BandCount + " windows=" + s.m_WindowCount
+                       + (s.TailValid() ? "" : " TAIL-INVALID") : "")
+                   + (s.m_LoadNote == RoadWorksSite.kNoteHalfWidthNoPlan ? " loaded-as-older-mode2-resave" : s.m_LoadNote == RoadWorksSite.kNoteBadTail ? " loaded-tail-dropped" : "")
+                   + (s.Mode == VisualMode.HalfWidth && s.Plan == PlanKind.None ? "(no upgrade plan: written as finished)"
+                      : LaneScan.ModeValid(s.Mode) ? "" : "(UNKNOWN)")
                    + (s.Has(SiteFlags.Migrated) ? " migrated-from-v2" : "")
                    + (s.Has(SiteFlags.Incompatible) ? " INCOMPATIBLE" : "")
                    + (s.Has(SiteFlags.LegacyPaused) ? " LEGACY-PAUSED-BIT" : "")

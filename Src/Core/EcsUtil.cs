@@ -220,6 +220,28 @@ namespace RealisticRoadWorks.V3
             return true;
         }
 
+        // A lane measured against an edge frame (EDGE frame of arc: EdgeRecord.Arc), exactly as the section measurement does
+        // (LaneSection.Probe from the lane's own curve): bits, half width, centre, extent and direction. False for a lane that is
+        // not a car / parking / track lane, has no curve or is Deleted. Traffic, Machines, Surfaces and the dev checks resolve
+        // lanes with this (or LaneCentre), so they agree on which band a lane lies in.
+        public static bool ProbeLane(EntityManager em, Entity lane, EdgeArc arc, out LaneProbe probe)
+        {
+            probe = default;
+            if (arc == null || !LaneBitsOf(em, lane, out LaneBits bits, out float width)) return false;
+            probe = LaneSection.Probe(arc, em.GetComponentData<Curve>(lane).m_Bezier, width * 0.5f, bits);
+            return true;
+        }
+
+        // EDGE-frame lateral centre of any lane with a curve (median of its interior samples, LaneSection.Probe). False for a
+        // missing or Deleted lane, or a lane without a curve.
+        public static bool LaneCentre(EntityManager em, Entity lane, EdgeArc arc, out float centre)
+        {
+            centre = 0f;
+            if (arc == null || !Alive(em, lane) || !em.HasComponent<Curve>(lane)) return false;
+            centre = LaneSection.Probe(arc, em.GetComponentData<Curve>(lane).m_Bezier, 0f, LaneBits.None).Centre;
+            return true;
+        }
+
         // Signature of an edge's car / parking / track lanes (entity, version, end points quantised to 0.1 m). The Director re-measures
         // the section when it changes although curve, width and end corners stayed the same (lanes regenerated after the first
         // measurement, a lane set that was incomplete in the creation frame). 0 = no such lane.

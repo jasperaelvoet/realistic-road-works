@@ -474,6 +474,115 @@ namespace RealisticRoadWorks.V3
             float w = compositionWidth;
             return w * 0.5f * math.saturate(1f - math.max(w * 0.2f, 3f) / math.max(1f, w));
         }
+
+        // ---- upgrade works: sub-strips from the measured section (EDGE frame). An approximation of the live layout for when the
+        //      Director has no CompositionLayout of the edge (UpgradeEdgeState.RefreshSubStrips prefers the layout): no bike lanes
+        //      (they count as drive lanes), the raised strip outside each carriageway edge is a sidewalk unless sidewalkLeft /
+        //      sidewalkRight (EDGE-frame sides) says it is a verge, a gap between carriage intervals inside the drive lanes is a
+        //      median. Drive lanes are cut at the lane lines and the direction split; Dir = +1 travels with the edge curve
+        //      (right of the split in right-hand traffic), -1 against it; a one-direction section uses ThroughF / ThroughB.
+
+        // The whole cross-section [-HalfWidth, HalfWidth] as sub-strips, sorted by Lo.
+        public void CrossSection(bool leftHandTraffic, List<SubStrip> output, bool sidewalkLeft = true, bool sidewalkRight = true)
+        {
+            output.Clear();
+            float hw = HalfWidth;
+            if (!(hw > 0.05f)) return;
+            float cLo = math.clamp(CarriageLo, -hw, hw), cHi = math.clamp(CarriageHi, -hw, hw);
+            if (cHi < cLo) { float t = cLo; cLo = cHi; cHi = t; }
+            float dLo = math.clamp(DriveLoE, cLo, cHi), dHi = math.clamp(DriveHiE, cLo, cHi);
+            if (dHi < dLo) { dLo = cLo; dHi = cHi; }
+            AddStrip(output, -hw, cLo, sidewalkLeft ? SubKind.Sidewalk : SubKind.Verge, 0);
+            if (dLo - cLo > 0.3f) AddStrip(output, cLo, dLo, SubKind.NewParking, 0);
+            else dLo = cLo;
+            bool parkR = cHi - dHi > 0.3f;
+            if (!parkR) dHi = cHi;
+            // drive-lane boundaries: lane lines of both groups, the split, the carriage interval edges inside [dLo, dHi]
+            var cuts = s_Cuts;
+            cuts.Clear();
+            cuts.Add(dLo); cuts.Add(dHi);
+            float split = Split;
+            bool two = !float.IsNaN(split) && split > dLo && split < dHi;
+            if (two) cuts.Add(split);
+            if (LanesMeasured)
+                for (int k = 0; k < 4; k++)
+                {
+                    float a = LaneLinesLeft[k], b = LaneLinesRight[k];
+                    if (!float.IsNaN(a) && a > dLo && a < dHi) cuts.Add(a);
+                    if (!float.IsNaN(b) && b > dLo && b < dHi) cuts.Add(b);
+                }
+            for (int i = 0; i < IntervalCount; i++)
+            {
+                float2 iv = Interval(i);
+                if (iv.x > dLo && iv.x < dHi) cuts.Add(iv.x);
+                if (iv.y > dLo && iv.y < dHi) cuts.Add(iv.y);
+            }
+            cuts.Sort();
+            sbyte oneDir = ThroughF > 0 && ThroughB == 0 ? (sbyte)1 : ThroughB > 0 && ThroughF == 0 ? (sbyte)-1 : (sbyte)0;
+            for (int k = 0; k + 1 < cuts.Count; k++)
+            {
+                float a = cuts[k], b = cuts[k + 1];
+                if (b - a < 0.05f) continue;
+                float mid = (a + b) * 0.5f;
+                if (IntervalCount > 1 && !InInterval(mid)) { AddStrip(output, a, b, SubKind.Median, 0); continue; }
+                sbyte dir;
+                if (two) dir = (mid > split) != leftHandTraffic ? (sbyte)1 : (sbyte)-1;
+                else dir = oneDir;
+                output.Add(new SubStrip { Lo = a, Hi = b, Kind = SubKind.DriveLane, Dir = dir });
+            }
+            if (parkR) AddStrip(output, dHi, cHi, SubKind.NewParking, 0);
+            AddStrip(output, cHi, hw, sidewalkRight ? SubKind.Sidewalk : SubKind.Verge, 0);
+        }
+
+        // Sub-strips of one band (EDGE frame): the cross-section clipped to [band.Lo, band.Hi], Terrain beyond +-HalfWidth.
+        public void SubStrips(in UpgradeBand band, bool leftHandTraffic, List<SubStrip> output, bool sidewalkLeft = true, bool sidewalkRight = true)
+        {
+            SubStrips(band.Lo, band.Hi, leftHandTraffic, output, sidewalkLeft, sidewalkRight);
+        }
+
+        public void SubStrips(float lo, float hi, bool leftHandTraffic, List<SubStrip> output, bool sidewalkLeft = true, bool sidewalkRight = true)
+        {
+            output.Clear();
+            if (!(hi > lo)) return;
+            var cs = s_Cross;
+            CrossSection(leftHandTraffic, cs, sidewalkLeft, sidewalkRight);
+            float hw = math.max(0f, HalfWidth);
+            if (lo < -hw) AddStrip(output, lo, math.min(hi, -hw), SubKind.Terrain, 0);
+            for (int k = 0; k < cs.Count; k++)
+            {
+                var c = cs[k];
+                float a = math.max(c.Lo, lo), b = math.min(c.Hi, hi);
+                if (b - a < 0.05f) continue;
+                if (c.Kind == SubKind.DriveLane || c.Kind == SubKind.NewParking || c.Kind == SubKind.Bike) output.Add(new SubStrip { Lo = a, Hi = b, Kind = c.Kind, Dir = c.Dir });
+                else AddStrip(output, a, b, c.Kind, 0);
+            }
+            if (hi > hw) AddStrip(output, math.max(lo, hw), hi, SubKind.Terrain, 0);
+        }
+
+        private bool InInterval(float x)
+        {
+            for (int i = 0; i < IntervalCount; i++) { float2 iv = Interval(i); if (x >= iv.x - 1e-3f && x <= iv.y + 1e-3f) return true; }
+            return IntervalCount == 0;
+        }
+
+        // Appends a piece; verge, terrain, sidewalk and median pieces merge with a touching same-kind neighbour.
+        private static void AddStrip(List<SubStrip> output, float a, float b, SubKind kind, sbyte dir)
+        {
+            if (b - a < 0.05f) return;
+            int last = output.Count - 1;
+            bool mergeable = kind == SubKind.Verge || kind == SubKind.Terrain || kind == SubKind.Sidewalk || kind == SubKind.Median;
+            if (mergeable && last >= 0 && output[last].Kind == kind && a - output[last].Hi < 0.06f)
+            {
+                var m = output[last];
+                m.Hi = b;
+                output[last] = m;
+                return;
+            }
+            output.Add(new SubStrip { Lo = a, Hi = b, Kind = kind, Dir = dir });
+        }
+
+        private static readonly List<float> s_Cuts = new List<float>(16);
+        private static readonly List<SubStrip> s_Cross = new List<SubStrip>(16);
     }
 
     // The RoadZones geometry shared by Machines (occupancy report), Traffic (lane groups), Props and Surfaces.
@@ -628,6 +737,34 @@ namespace RealisticRoadWorks.V3
             return RoadZones.Carriageway;
         }
 
+        // Zones a lateral interval of an upgrade band touches (CHAIN frame, lo < hi): OfLateral plus the verge bits where it reaches
+        // beyond the road outline (+-HalfWidth: terrain of a remove band, the outside of a build band's new land) or onto a raised
+        // strip that is not a sidewalk band of the section. Machines / Props / Surfaces clip with it; never a Traffic group.
+        public static RoadZones OfBand(float loChain, float hiChain, in EdgeSection sec, bool chainReversed)
+        {
+            var z = OfLateral(loChain, hiChain, sec, chainReversed);
+            CarriageChain(sec, chainReversed, out float lo, out float hi);
+            float hw = sec.HalfWidth;
+            bool leftWalk = lo > -hw + 0.3f, rightWalk = hi < hw - 0.3f;
+            if (loChain < -hw || (!leftWalk && loChain < lo - 0.05f)) z |= RoadZones.VergeLeft;
+            if (hiChain > hw || (!rightWalk && hiChain > hi + 0.05f)) z |= RoadZones.VergeRight;
+            return z;
+        }
+
+        // Same for a band in the CHAIN frame (UpgradeEdgeState.ChainBands, UpgradeBandView laterals).
+        public static RoadZones OfBand(in UpgradeBand chainBand, in EdgeSection sec, bool chainReversed) =>
+            OfBand(chainBand.Lo, chainBand.Hi, sec, chainReversed);
+
+        // Union of the zones of EDGE-frame sub-strips (UpgradeZones.OfSubStrip with the section's chain split).
+        public static RoadZones OfSubStrips(List<SubStrip> strips, in EdgeSection sec, bool chainReversed)
+        {
+            var z = RoadZones.None;
+            if (strips == null) return z;
+            float split = DirSplitChain(sec, chainReversed);
+            for (int k = 0; k < strips.Count; k++) z |= UpgradeZones.OfSubStrip(strips[k], chainReversed, split);
+            return z;
+        }
+
         // A lane of a Closed works edge carries traffic iff its whole group is open.
         public static bool LaneOpen(RoadZones laneGroup, RoadZones open) => laneGroup != RoadZones.None && (laneGroup & ~open) == 0;
 
@@ -646,6 +783,7 @@ namespace RealisticRoadWorks.V3
             Add(RoadZones.ParkingLeft, "parkL"); Add(RoadZones.ParkingRight, "parkR");
             Add(RoadZones.Outside, "out");
             Add(RoadZones.LeftOuter | RoadZones.LeftInner | RoadZones.RightOuter | RoadZones.RightInner, "bands");
+            Add(RoadZones.VergeLeft, "vergeL"); Add(RoadZones.VergeRight, "vergeR");
             return sb.ToString();
         }
     }
@@ -685,6 +823,7 @@ namespace RealisticRoadWorks.V3
         {
             if (p == null) return 0f;
             float prog = p.Model.PPerFrame != 0f ? p.Model.At(renderFrame, frameTime) : p.Progress;
+            if (UpgradeViewAt(p, prog, out var uv)) return PhasePlan.MainFront(uv);
             WorksPhase ph = PhasePlan.PhaseOf(p.Kind, prog, out float f);
             if (ph != p.Phase) return p.FrontU;   // never run ahead into the next phase's front before the Director switches
             // The C4 front depends on the stage (C4a / C4b painter sweeps when the side swap is on)
@@ -698,11 +837,27 @@ namespace RealisticRoadWorks.V3
         {
             if (p == null) return 0f;
             float prog = p.Model.PPerFrame != 0f ? p.Model.At(renderFrame, frameTime) : p.Progress;
+            if (UpgradeViewAt(p, prog, out var uv)) return PhasePlan.CrewFront(uv, crew);
             WorksPhase ph = PhasePlan.PhaseOf(p.Kind, prog, out float f);
             var v = p.View();
             if (ph != p.Phase) return PhasePlan.CrewFront(v, crew);   // never run ahead into the next phase's front
             v.F = f;
             return PhasePlan.CrewFront(v, crew);
+        }
+
+        // Upgrade works: the view at render progress prog, kept in the Director's current window and phase (never ahead into
+        // the next window or phase; then the Director's own view). False for every other project.
+        private static bool UpgradeViewAt(ProjectRecord p, float prog, out ProjectView v)
+        {
+            v = default;
+            if (p.Mode != VisualMode.HalfWidth || p.Upgrade == null) return false;
+            v = p.View();
+            if (!v.IsUpgrade) return false;
+            var u = p.Upgrade.View(prog);
+            if (u.Window != v.Upgrade.Window || !p.Upgrade.LeadPhase(prog, out var ph, out float f) || ph != p.Phase) return true;
+            v.Upgrade = u;
+            v.F = f;
+            return true;
         }
     }
 }

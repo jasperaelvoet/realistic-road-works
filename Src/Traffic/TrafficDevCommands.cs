@@ -307,7 +307,7 @@ namespace RealisticRoadWorks.V3.Traffic
                     if (u3 == null && em.Exists(e) && em.HasComponent<RoadWorksRuntime>(e))
                     {
                         var rt = em.GetComponentData<RoadWorksRuntime>(e);
-                        u3 = TrafficRequestSystem.U3Violation(p, rt.m_Phase, rt.m_ClosureTarget, upd);
+                        u3 = TrafficRequestSystem.U3Violation(em, p, rt.m_Phase, rt.m_ClosureTarget, upd);
                     }
                 }
                 ctx.Log("rrw tr p" + p.Id + " " + p.Kind + " mode=" + p.Mode + " phase=" + p.Phase + " closure=" + p.Closure + " applied=" + applied + "/" + p.Edges.Count +
@@ -328,7 +328,8 @@ namespace RealisticRoadWorks.V3.Traffic
     {
         public string Name => "rrw.tr.probe";
         public string Help => "rrw.tr.probe <site> [v] [dir=..] [lanes=..] [side=..] - lane fields vs the applied state per lane group " +
-                              "(OPEN/SOFT/CLOSED-S/CLOSED-B, drained, dir) => MATCH|MISMATCH (no closure: VANILLA|NOT_VANILLA); v: one line per lane";
+                              "(OPEN/SOFT/CLOSED-S/CLOSED-B, drained, dir) => MATCH|MISMATCH (no closure: VANILLA|NOT_VANILLA); v: one line per lane " +
+                              "(upgrade works: drop = lane dropped now (stage), blk = our lane closure markers on the lane)";
         public void Run(DevContext ctx, string[] a)
         {
             var em = ctx.EntityManager;
@@ -340,7 +341,8 @@ namespace RealisticRoadWorks.V3.Traffic
                 TrafficState.Closures.TryGetValue(edge, out var cl);
                 var g = TrafficDevSites.GroupsOf(em, edge);
                 SiteRegistry.TryGetEdge(edge, out var rec);
-                int checks = 0, ok = 0, forbidden = 0, blocked = 0, sentinelRefs = 0, stale = 0;
+                int checks = 0, ok = 0, forbidden = 0, blocked = 0, sentinelRefs = 0, stale = 0, dropLanes = 0, markers = 0;
+                TrafficState.Upgrade.TryGetValue(edge, out var ut);
                 int[] states = new int[5];
                 var lanes = new List<Entity>();
                 TrafficUtil.LanesInto(em, edge, lanes);
@@ -356,6 +358,14 @@ namespace RealisticRoadWorks.V3.Traffic
                     sb.Append(" group=").Append(TrafficUtil.Bits(grp)).Append(" state=").Append(StateName(st, cl))
                       .Append(" drained=").Append(drained).Append(" dir=").Append(dir > 0 ? "+" : dir < 0 ? "-" : "?");
                     if (g != null && g.LateralOf(em, lane, out float lat)) sb.Append(" lat=").Append(RRWLog.F(lat));
+                    int blk = LaneClosureMarkers.CountOnLane(em, lane);
+                    var ld = ut != null ? (ut.Find(lane, false) ?? ut.Find(lane, true)) : null;
+                    bool drop = rec?.Upgrade != null && rec.Upgrade.DropLanes.Contains(lane);
+                    if (drop) dropLanes++;
+                    markers += blk;
+                    if (drop || blk > 0 || ld != null)
+                        sb.Append(" drop=").Append(drop ? (ld != null ? UpgradeTraffic.StageText(ld) : "untracked") : (ld != null ? "released:" + UpgradeTraffic.StageText(ld) : "no"))
+                          .Append(" blk=").Append(blk);
                     bool pass = TrafficApply.LaneMatches(em, lane, cl, sentinel, sb);
                     checks++; if (pass) ok++;
                     if (TrafficApply.ReferencesSentinel(em, lane, sentinel)) sentinelRefs++;
@@ -380,6 +390,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 ctx.Log("rrw tr probe e" + edge.Index + " level=" + (cl != null ? cl.State : "Open") + " parking=" + (cl != null && cl.ParkClosed ? "disabled" : "untouched") +
                         " lanes(open/slow/soft/closedS/closedB)=" + states[0] + "/" + states[1] + "/" + states[2] + "/" + states[3] + "/" + states[4] +
                         " sentinelRefs=" + sentinelRefs + " fullBlockage=" + blocked + " forbidden=" + forbidden + " staleRestrictions=" + stale +
+                        " dropLanes=" + dropLanes + " markers=" + markers +
                         (f.Any ? " filter(" + f + ")" : "") + report + " checks=" + ok + "/" + checks + " => " + verdict);
             }
         }
@@ -580,6 +591,82 @@ namespace RealisticRoadWorks.V3.Traffic
             string tag = TrafficDevSites.Opt(a, "tag", "TR");
             TrafficState.DevOps.Add((em, upd) => TrafficDevClose.Open(em, upd, edges, tag));
             ctx.Log("rrw tr open queued edges=" + edges.Count);
+        }
+    }
+
+    // Upgrade works: lane drops, markers, switched-off new parking and the detour verdict per mode H project.
+    public sealed class TrafficDropsCommand : IDevCommand
+    {
+        public string Name => "rrw.tr.drops";
+        public string Help => "rrw.tr.drops [all|p<id>|#n] [v] [detour] - upgrade works traffic per mode H project: window, primitive, dropped lanes, " +
+                              "markers, applied/registered/ready edges, intrusion, clean checks, released markers, switched-off new parking, detour verdict; " +
+                              "v: one line per edge; detour: compute the detour verdict now";
+        public void Run(DevContext ctx, string[] a)
+        {
+            var em = ctx.EntityManager;
+            uint upd = RRWClock.UpdateIndex;
+            string site = TrafficDevSites.Arg(a, 0);
+            if (site == "v" || site == "detour") site = null;
+            bool verbose = TrafficDevSites.Flag(a, "v"), detour = TrafficDevSites.Flag(a, "detour");
+            var projects = new List<ProjectRecord>();
+            if (site == null || site == "all") { foreach (var p in SiteRegistry.Projects.Values) if (p.Mode == VisualMode.HalfWidth) projects.Add(p); }
+            else
+            {
+                foreach (var e in TrafficDevSites.Edges(ctx, site))
+                    if (SiteRegistry.TryGetEdge(e, out var r) && SiteRegistry.TryGetProject(r.ProjectId, out var p) && !projects.Contains(p)) projects.Add(p);
+            }
+            projects.Sort((x, y) => x.Id.CompareTo(y.Id));
+            int markersAll = 0, releasingAll = 0;
+            foreach (var et in TrafficState.Upgrade.Values)
+                for (int i = 0; i < et.Lanes.Count; i++) { markersAll += et.Lanes[i].Markers.Count; if (et.Lanes[i].Stage == DropStage.Releasing) releasingAll++; }
+            ctx.Log("rrw tr drops tracked=" + TrafficState.Upgrade.Count + " markers=" + markersAll + " releasingLanes=" + releasingAll + " placed=" + TrafficState.MarkersPlaced +
+                    " removed=" + TrafficState.MarkersRemoved + " misregistered=" + TrafficState.MarkersMisregistered + " failures=" + TrafficState.DropFailures +
+                    " pendingRefresh=" + TrafficState.UpgradeRefresh.Count + " " + LaneClosureMarkers.Describe(em) + " gates(uwdrop=" + RRWGates.UpgradeDrop +
+                    " uwparkoff=" + RRWGates.UpgradeNewParkingOff + " uwvdrop=" + RRWGates.UpgradeVisualDrop + ")");
+            foreach (var p in projects)
+            {
+                var rt = p.Upgrade;
+                if (detour && rt != null) TrafficDetour.Update(em, p, upd);
+                bool h = UpgradeTraffic.ViewOf(p, upd, out var uv);
+                int dropEdges = 0, lanes = 0, markers = 0, applied = 0, registered = 0, ready = 0, intrusion = 0, releasing = 0, failed = 0, parkingOff = 0;
+                int minClean = int.MaxValue;
+                foreach (var e in p.Edges)
+                {
+                    if (!SiteRegistry.TryGetEdge(e, out var rec) || rec.Upgrade == null) continue;
+                    var st = rec.Upgrade;
+                    parkingOff += st.ParkingOffLanes.Count;
+                    if (TrafficState.Upgrade.TryGetValue(e, out var et))
+                        for (int i = 0; i < et.Lanes.Count; i++)
+                        {
+                            markers += et.Lanes[i].Markers.Count;
+                            if (et.Lanes[i].Stage == DropStage.Releasing) releasing++;
+                            else if (et.Lanes[i].Stage == DropStage.Failed) failed++;
+                        }
+                    if (st.DropLanes.Count == 0) continue;
+                    dropEdges++;
+                    lanes += st.DropLanes.Count;
+                    if (st.DropApplied) applied++;
+                    if (st.BlockersRegistered) registered++;
+                    if (h && st.DropReadyFor(rec.GeometryRevision, uv)) ready++;
+                    if (st.DropIntrusion) intrusion++;
+                    minClean = Math.Min(minClean, st.DropCleanChecks);
+                }
+                string det = rt == null ? "none" : rt.DetourUpdate == 0 ? "pending" :
+                    (rt.DetourHalves == RoadZones.None ? "none" : TrafficUtil.Bits(rt.DetourHalves)) + " for=" + rt.DetourRevision + "/" + p.Revision +
+                    " age=" + unchecked(upd - rt.DetourUpdate);
+                ctx.Log("rrw tr drops p" + p.Id + " upgrade=" + h + (h ? " window=" + uv.Window + "/" + uv.WindowCount + " layout=" + uv.LayoutWindow + " prim=" + uv.Traffic +
+                        " applied=" + uv.AppliedWindow + "/" + uv.AppliedTraffic + (uv.Vacating ? " (vacating)" : "") +
+                        " allAtOnce=" + uv.AllAtOnce : "") + " edges=" + p.Edges.Count + " dropEdges=" + dropEdges + " lanes=" + lanes + " markers=" + markers +
+                        " applied=" + applied + "/" + dropEdges + " registered=" + registered + "/" + dropEdges + " ready=" + ready + "/" + dropEdges +
+                        " intrusion=" + intrusion + " minClean=" + (minClean == int.MaxValue ? "-" : minClean.ToString()) + " releasing=" + releasing + " failed=" + failed +
+                        " parkingOff=" + parkingOff + " detour=" + det + " closure=" + p.Closure + " openLanes=" + TrafficUtil.Bits(p.OpenLanes));
+                if (!verbose) continue;
+                foreach (var e in p.Edges)
+                    ctx.Log("rrw tr drops   e" + e.Index + UpgradeTraffic.DescribeEdge(em, e));
+            }
+            foreach (var et in TrafficState.Upgrade.Values)
+                if (!SiteRegistry.Edges.ContainsKey(et.Edge) && (site == null || site == "all"))
+                    ctx.Log("rrw tr drops   e" + et.Edge.Index + " (no longer a works edge, last p" + et.ProjectId + ")" + UpgradeTraffic.DescribeEdge(em, et.Edge));
         }
     }
 }

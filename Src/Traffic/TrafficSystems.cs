@@ -74,7 +74,8 @@ namespace RealisticRoadWorks.V3.Traffic
             if (!TrafficGate.InGame) return;
             if (TrafficState.PurgePending) PurgeStaleSentinels();
             if (TrafficState.Disabled || m_Guard.Faulted) { FailSafe(); return; }
-            if (SiteRegistry.Edges.Count == 0 && TrafficState.Closures.Count == 0 && !TrafficState.VerifyPending && TrafficState.DevOps.Count == 0) return;
+            if (SiteRegistry.Edges.Count == 0 && TrafficState.Closures.Count == 0 && !TrafficState.VerifyPending && TrafficState.DevOps.Count == 0 &&
+                !UpgradeTraffic.Busy) return;
             long t = RRWPerf.Start();
             try
             {
@@ -93,6 +94,18 @@ namespace RealisticRoadWorks.V3.Traffic
         private void PurgeStaleSentinels()
         {
             TrafficState.PurgePending = false;
+            try
+            {
+                // Lane closure markers are never saved (LivePath) and the tracking is reset on load: any left now is stale.
+                var markers = LaneClosureMarkers.Query(EntityManager);
+                if (!markers.IsEmptyIgnoreFilter)
+                {
+                    int m = markers.CalculateEntityCount();
+                    EntityManager.AddComponent<Deleted>(markers);
+                    RRWLog.Warn("traffic removed " + m + " stale lane closure marker(s) after load");
+                }
+            }
+            catch (Exception e) { RRWLog.ErrorOnce("traffic marker purge", e); }
             try
             {
                 if (m_ZoneQuery.IsEmptyIgnoreFilter) return;
@@ -117,6 +130,8 @@ namespace RealisticRoadWorks.V3.Traffic
                 for (int i = 0; i < forb.Count; i++) TrafficApply.RestoreForbiddenNow(em, forb[i]);
                 foreach (var cl in TrafficState.Closures.Values)
                     if (TrafficUtil.Alive(em, cl.Edge)) { TrafficUtil.RefreshEdge(em, cl.Edge, false, out _); n++; }
+                int markers = UpgradeTraffic.RemoveEverything(em);
+                if (markers > 0) RRWLog.Error("traffic disabled: " + markers + " lane closure marker(s) removed, every dropped lane is open again");
                 TrafficState.Closures.Clear();
                 TrafficState.EventLanes.Clear();
                 TrafficState.DevOps.Clear();
@@ -191,11 +206,14 @@ namespace RealisticRoadWorks.V3.Traffic
                 // U3: a works road handed back while its project still reports machines on the carriageway (the Director
                 // must keep the site until PhasePlan.MachinesHoldRoad clears). Warn once per project.
                 if (alive && TrafficState.Closures.TryGetValue(e, out var gone) && !gone.IsDev && SiteRegistry.TryGetProject(gone.ProjectId, out var gp) &&
-                    gp.Mode == VisualMode.FullDig && gp.MachinesReportFresh(upd) && gp.MachinesOnCarriageway > 0)
+                    PhasePlan.HasMachines(gp.Mode) && gp.MachinesReportFresh(upd) && gp.MachinesOnCarriageway > 0)
                     RRWLog.Once("traffic-u3-removed-p" + gp.Id, "WARN traffic p" + gp.Id + " U3: site of e" + e.Index + " removed (road opens) while " +
                                 gp.MachinesOnCarriageway + " machine(s) are on the carriageway" + MachineText(gp, upd));
                 TrafficUtil.OpenClosure(em, e, alive, upd, alive ? "site removed" : "edge deleted");
             }
+
+            // 2b. Upgrade works: lane drops (markers), switched-off new parking, released markers, the detour verdict.
+            UpgradeTraffic.Step(em, World, upd, s);
 
             // 3. Parked-car relocation (one update after ParkingDisabled landed) and the optional HardClose.
             bool scannedApproach = false;
@@ -260,6 +278,10 @@ namespace RealisticRoadWorks.V3.Traffic
             SiteRegistry.TryGetProject(rec.ProjectId, out var proj);
             ClosureLevel target = s.ClosureLayer ? rt.m_ClosureTarget : ClosureLevel.Open;
             bool construction = rt.m_Kind == WorksKind.Construction;
+            // Upgrade works (every HalfWidth project): parking that no window closes stays in use, closing groups drain with the
+            // sentinel only (never Forbidden), and cars keep reaching buildings while a car half carries traffic.
+            bool upgrade = proj != null && proj.Mode == VisualMode.HalfWidth;
+            SoftMode softMode = upgrade ? SoftMode.Sentinel : s.Soft;
 
             // Buildings along the edge (zoned buildings may spawn along a works road: ZoneSpawnSystem ignores works).
             if (!slot.BuildingsChecked || upd - slot.BuildingsCheckUpdate >= TrafficConst.kBuildingsCheckInterval)
@@ -270,8 +292,9 @@ namespace RealisticRoadWorks.V3.Traffic
             }
             // U3 rule: a mode-A construction stays Closed for the whole works (machines on the lanes), so buildings wait
             // while the target is Closed, not only while the road is hidden. Open sidewalks (staged opening) let people walk in.
-            rec.BuildingsWaiting = target == ClosureLevel.Closed ? slot.Buildings : 0;
-            if (construction && target == ClosureLevel.Closed && slot.Buildings > 0 && !slot.BuildingsLogged)
+            bool carsReach = upgrade && (rt.m_OpenLanes & RoadZones.Carriageway) != RoadZones.None;
+            rec.BuildingsWaiting = target == ClosureLevel.Closed && !carsReach ? slot.Buildings : 0;
+            if (construction && target == ClosureLevel.Closed && slot.Buildings > 0 && !slot.BuildingsLogged && !carsReach)
             {
                 slot.BuildingsLogged = true;
                 RRWLog.Info("traffic e" + edge.Index + " (p" + rec.ProjectId + ", " + rt.m_Phase + "): " + slot.Buildings +
@@ -353,9 +376,10 @@ namespace RealisticRoadWorks.V3.Traffic
                 bool closed = target == ClosureLevel.Closed;
                 bool parkClosed = closed && slot.Buildings == 0;
                 bool hardWanted = closed && s.HardClose;
-                // SOFT and OPEN never overlap (closing wins: fail closed); parking never opens during works (design decision).
+                // SOFT and OPEN never overlap (closing wins: fail closed); parking never opens during works (design decision),
+                // except on upgrade works, where parking that no window closes stays in use.
                 RoadZones soft = closed ? rt.m_SoftZones & RoadZones.AllLanes : RoadZones.None;
-                RoadZones open = closed ? rt.m_OpenLanes & RoadZones.AllLanes & ~RoadZones.Parking : RoadZones.None;
+                RoadZones open = closed ? rt.m_OpenLanes & RoadZones.AllLanes & ~ParkingKeptClosed(upgrade) : RoadZones.None;
                 if ((soft & open) != RoadZones.None)
                 {
                     var ps0 = proj?.GetOrCreate<TrafficProjectSlot>(ModuleSlot.Traffic);
@@ -375,11 +399,12 @@ namespace RealisticRoadWorks.V3.Traffic
                 RoadZones prevB = isNew ? RoadZones.None : cl.ClosedB;
                 if (isNew)
                 {
-                    cl = new EdgeClosure { Edge = edge, Level = target, SoftModeApplied = s.Soft };
+                    cl = new EdgeClosure { Edge = edge, Level = target, SoftModeApplied = softMode };
                     TrafficState.Closures[edge] = cl;
                 }
                 cl.ProjectId = rec.ProjectId;
                 cl.Groups = slot.Groups;
+                cl.ParkingOff = TrafficState.Upgrade.TryGetValue(edge, out var ut) ? ut.ParkingOff : null;
 
                 // CLOSED-B (RRWGates.ClosedB): car groups of a visible edge with buildings, only once drained under the sentinel
                 // and empty of stopped vehicles too (a stopped vehicle on a fully blocked lane can never get a path again).
@@ -395,7 +420,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 bool regroupApplied = !isNew && regroup && prev == ClosureLevel.Closed;
                 RoadZones narrowed = prevOpen & ~open;
                 RoadZones softAdded = soft & ~prevSoft;
-                bool modeChange = !isNew && soft != RoadZones.None && cl.SoftModeApplied != s.Soft;
+                bool modeChange = !isNew && soft != RoadZones.None && cl.SoftModeApplied != softMode;
                 bool narrowing = !isNew && prev == ClosureLevel.Closed && closed && ((narrowed | softAdded) != RoadZones.None || modeChange);
                 bool change = isNew || prev != target || prevPark != parkClosed || prevOpen != open || prevSoft != soft || regroupApplied ||
                               modeChange || ((target == ClosureLevel.SlowZone || (open & RoadZones.Carriageway) != 0) && Math.Abs(cl.SlowSpeed - s.SlowSpeed) > 0.01f);
@@ -424,7 +449,7 @@ namespace RealisticRoadWorks.V3.Traffic
                     cl.Caution = true;
                     cl.Open = open;
                     cl.Soft = soft;
-                    cl.SoftModeApplied = s.Soft;
+                    cl.SoftModeApplied = softMode;
                     cl.ClosedB = closedB;
                     if (closed) TrafficState.EnsureSentinel(em);
                     string detail = TrafficUtil.RefreshClosure(em, cl, false, upd);
@@ -522,6 +547,10 @@ namespace RealisticRoadWorks.V3.Traffic
         // carriageway closed on both halves in a construction (C3, C4 without a car half) keeps the sentinel.
         private static bool BScope(WorksKind kind, RoadZones open) =>
             kind == WorksKind.Demolition || (open & RoadZones.Carriageway) != RoadZones.None;
+
+        // Lane groups that never open while a road is Closed: parking (design decision), except on upgrade works (the Director
+        // closes exactly the parking a window works on).
+        public static RoadZones ParkingKeptClosed(bool upgrade) => upgrade ? RoadZones.None : RoadZones.Parking;
 
         // Drain report of one edge. A closed or SOFT group is DRAINED when its lanes carry the applied state and two
         // LaneObject scans kDrainCheckUpdates apart found no Moving object on them, or kDrainTimeoutFrames (sim frames) passed
@@ -658,7 +687,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 for (int i = 0; i < buf.Length; i++)
                 {
                     var o = buf[i].m_LaneObject;
-                    if (!em.Exists(o)) continue;
+                    if (!em.Exists(o) || em.HasComponent<TrafficLaneBlocker>(o)) continue;    // our lane closure markers never leave
                     // Parked cars do not keep a group busy (they never leave on their own), but a parking strip
                     // that holds them is reported (EdgeRecord.ZonesParked) so machines never plan into it
                     if (em.HasComponent<ParkedCar>(o)) { parked |= g & RoadZones.Parking; continue; }
@@ -720,21 +749,24 @@ namespace RealisticRoadWorks.V3.Traffic
         //  * while it releases the road, it stays Closed until a fresh Machines report shows the carriageway clear
         //    (PhasePlan.MachinesHoldRoad; after kCompletionMachineWaitSimFrames the Director opens anyway and warns itself);
         //  * a fresh report with machines on the carriageway and a target below Closed is always wrong (before the cap).
-        private static void CheckU3(ProjectRecord proj, in RoadWorksRuntime rt, ClosureLevel target, Entity edge, uint upd)
+        //  * a mode H (upgrade) project: a fresh report with a machine in a lane group that carries traffic (dropped lanes with
+        //    markers and switched-off new parking excepted).
+        private void CheckU3(ProjectRecord proj, in RoadWorksRuntime rt, ClosureLevel target, Entity edge, uint upd)
         {
-            if (target == ClosureLevel.Closed || proj.Mode != VisualMode.FullDig) return;
-            string why = U3Violation(proj, rt.m_Phase, target, upd);
-            if (why == null) return;
+            if (proj.Mode != VisualMode.HalfWidth && (target == ClosureLevel.Closed || proj.Mode != VisualMode.FullDig)) return;
             var ps = proj.GetOrCreate<TrafficProjectSlot>(ModuleSlot.Traffic);
             if (ps.U3Warned) return;
+            string why = U3Violation(EntityManager, proj, rt.m_Phase, target, upd);
+            if (why == null) return;
             ps.U3Warned = true;
             RRWLog.Warn("traffic p" + proj.Id + " " + proj.Kind + " U3: target " + target + " on e" + edge.Index + " in " + rt.m_Phase + " but " + why +
                         " (Traffic applies the Director's target; fix the Director closure)");
         }
 
         // Null when the target is allowed; otherwise the broken rule. Shared with rrw.check (TrafficIntrospection).
-        public static string U3Violation(ProjectRecord proj, WorksPhase phase, ClosureLevel target, uint upd)
+        public static string U3Violation(EntityManager em, ProjectRecord proj, WorksPhase phase, ClosureLevel target, uint upd)
         {
+            if (proj.Mode == VisualMode.HalfWidth) return UpgradeTraffic.MachinesInOpenLanes(em, proj, target, upd);
             if (target == ClosureLevel.Closed || proj.Mode != VisualMode.FullDig) return null;
             if (phase != WorksPhase.Complete && !proj.Releasing) return "a mode-A project must stay Closed for the whole works";
             // Director safety cap (MachinesHoldRoad gives up at ProjectRecord.ReleaseCapped; it warns itself).
@@ -1266,7 +1298,7 @@ namespace RealisticRoadWorks.V3.Traffic
 
         protected override void OnUpdate()
         {
-            if (TrafficState.Closures.Count == 0) return;
+            if (TrafficState.Closures.Count == 0 && TrafficState.Upgrade.Count == 0) return;
             // Set first: if neutralising throws half-way, the restore system still re-applies every closure.
             TrafficState.SaveNeutralised = true;
             TrafficState.SaveFreeSpace.Clear();
@@ -1286,9 +1318,13 @@ namespace RealisticRoadWorks.V3.Traffic
                         n += TrafficApply.WriteSnapshot(em, lane, cl);
                     }
                 }
+                // Lane closure markers of upgrade works: the lane data they cause, AFTER the closure snapshots were written.
+                int blockLanes = LaneClosureMarkers.NeutraliseForSave(em, out int owners, out int markers, out int noLivePath);
                 RRWLog.Info("traffic save-guard: neutralised " + n + " lane components (" + TrafficState.SaveFreeSpace.Count +
                             " parking free-space overrides, " + TrafficState.ForbiddenSnap.Count + " Forbidden bits, " + missing +
-                            " lanes without snapshot) of " + TrafficState.Closures.Count + " closures");
+                            " lanes without snapshot) of " + TrafficState.Closures.Count + " closures; lane closure markers: " + blockLanes +
+                            " lane(s) of " + owners + " owner(s) neutralised, " + markers + " marker(s), " + noLivePath + " without LivePath");
+                if (noLivePath > 0) RRWLog.Error("traffic save-guard: " + noLivePath + " lane closure marker(s) without LivePath would be saved");
             }
             catch (Exception e) { RRWLog.ErrorOnce("traffic save-guard (after " + n + " writes)", e); }
         }
@@ -1307,6 +1343,8 @@ namespace RealisticRoadWorks.V3.Traffic
             {
                 var em = EntityManager;
                 em.CompleteAllTrackedJobs();
+                // Marker lane values first (they were neutralised last, on top of the closure snapshots), then the closures.
+                int markerLanes = LaneClosureMarkers.RestoreAfterSave(em);
                 int n = 0;
                 Entity sentinel = TrafficState.HasClosed ? TrafficState.EnsureSentinel(em) : TrafficState.Sentinel;
                 foreach (var cl in TrafficState.Closures.Values)
@@ -1322,14 +1360,17 @@ namespace RealisticRoadWorks.V3.Traffic
                     }
                 }
                 TrafficState.SaveFreeSpace.Clear();
-                RRWLog.Info("traffic save-guard: re-applied " + n + " lane components after serialization");
+                RRWLog.Info("traffic save-guard: re-applied " + n + " lane components after serialization (" + markerLanes + " lane closure marker lane(s))");
             }
             catch (Exception e)
             {
                 // Lanes may be left at vanilla values: refresh them so the closure systems re-apply next frame.
                 RRWLog.ErrorOnce("traffic save-restore", e);
                 TrafficState.SaveFreeSpace.Clear();
+                LaneClosureMarkers.ClearSaveState();
                 TrafficState.RefreshAllPending = true;
+                // the game recomputes the marker lanes' blockage from the (still registered) markers on a refresh
+                foreach (var et in TrafficState.Upgrade.Values) TrafficState.UpgradeRefresh[et.Edge] = RRWClock.UpdateIndex + 1;
             }
         }
     }
@@ -1405,6 +1446,7 @@ namespace RealisticRoadWorks.V3.Traffic
             }
             sb.Append(" lanes=").Append(lanes).Append(" sentinelLanes=").Append(sentinelLanes);
             if (cl != null) sb.Append(" laneStates(open/soft/closedS/closedB)=").Append(openLanes).Append('/').Append(soft).Append('/').Append(closedS).Append('/').Append(closedB);
+            sb.Append(UpgradeTraffic.DescribeEdge(em, edge));
             return sb.ToString();
         }
 
@@ -1429,10 +1471,12 @@ namespace RealisticRoadWorks.V3.Traffic
                         if (!SiteRegistry.TryGetEdge(e, out var r) || !TrafficUtil.Alive(em, e) || !em.HasComponent<RoadWorksRuntime>(e)) continue;
                         openApplied |= r.OpenLanesApplied;
                         var rt = em.GetComponentData<RoadWorksRuntime>(e);
-                        string why = TrafficRequestSystem.U3Violation(proj, rt.m_Phase, rt.m_ClosureTarget, upd);
+                        string why = TrafficRequestSystem.U3Violation(em, proj, rt.m_Phase, rt.m_ClosureTarget, upd);
                         if (why != null) { problems.Add("traffic: U3 p" + proj.Id + " e" + e.Index + " target " + rt.m_ClosureTarget + " in " + rt.m_Phase + ": " + why); break; }
                     }
                     var busyOpen = openApplied & proj.MachineZones & RoadZones.AllLanes;
+                    // upgrade works: machines stand in dropped lanes (markers) inside open groups
+                    if (busyOpen != RoadZones.None && proj.Mode == VisualMode.HalfWidth) busyOpen &= ~UpgradeTraffic.MarkedZones(em, proj);
                     if (busyOpen != RoadZones.None && proj.MachinesReportFresh(upd))
                         problems.Add("traffic: p" + proj.Id + " machines in open lane group(s) " + TrafficUtil.Bits(busyOpen) + " (open " + TrafficUtil.Bits(openApplied) +
                                      ", machine zones " + TrafficUtil.Bits(proj.MachineZones) + (proj.Crews > 1 ? ", union of " + proj.Crews + " crews" : "") + ")");
@@ -1464,7 +1508,8 @@ namespace RealisticRoadWorks.V3.Traffic
                 if (!TrafficState.Disabled && cl != null && !cl.IsDev && target == ClosureLevel.Closed)
                 {
                     var soft = rtE.m_SoftZones & RoadZones.AllLanes;
-                    var want = rtE.m_OpenLanes & RoadZones.AllLanes & ~RoadZones.Parking & ~soft;
+                    bool upgrade = SiteRegistry.TryGetProject(rec.ProjectId, out var ep) && ep.Mode == VisualMode.HalfWidth;
+                    var want = rtE.m_OpenLanes & RoadZones.AllLanes & ~TrafficRequestSystem.ParkingKeptClosed(upgrade) & ~soft;
                     if (cl.Open != want) problems.Add("traffic: e" + edge.Index + " open lane groups " + TrafficUtil.Bits(cl.Open) + " but target " + TrafficUtil.Bits(want));
                     if (cl.Soft != soft) problems.Add("traffic: e" + edge.Index + " soft groups " + TrafficUtil.Bits(cl.Soft) + " but target " + TrafficUtil.Bits(soft));
                     // P4: with CLOSED-B on, a drained car group of a visible building edge beside an open group must be CLOSED-B.
@@ -1501,10 +1546,81 @@ namespace RealisticRoadWorks.V3.Traffic
                 if (mismatch > 0) problems.Add("traffic: e" + edge.Index + " " + mismatch + " lane(s) do not carry their group state (first " + RRWLog.E(first) +
                                                " should be " + firstState + "; rrw.tr.probe e" + edge.Index + " v)");
             }
+            UpgradeChecks(em, problems, upd);
+
             // Opened edges are verified by the request system; report a pending mismatch here too.
             foreach (var kv in TrafficState.Closures)
                 if (!kv.Value.IsDev && !SiteRegistry.Edges.ContainsKey(kv.Key) && TrafficUtil.Alive(em, kv.Key))
                     problems.Add("traffic: closure on e" + kv.Key.Index + " which is no longer a works edge");
+        }
+
+        // Upgrade works: markers only on dropped lanes of edges without buildings, the report agrees with the markers, released
+        // markers do not linger past the cap, no Forbidden of ours anywhere on a mode H edge.
+        private static void UpgradeChecks(EntityManager em, List<string> problems, uint upd)
+        {
+            foreach (var et in TrafficState.Upgrade.Values)
+            {
+                SiteRegistry.TryGetEdge(et.Edge, out var rec);
+                int buildings = rec != null ? rec.BuildingCount : 0;
+                int active = 0;
+                for (int i = 0; i < et.Lanes.Count; i++)
+                {
+                    var ld = et.Lanes[i];
+                    if (ld.Stage == DropStage.Releasing)
+                    {
+                        if (unchecked(upd - ld.ReleaseUpdate) > (uint)RRWConst.kCompletionMachineWaitUpdatesHard)
+                            problems.Add("traffic: e" + et.Edge.Index + " released lane at lateral " + RRWLog.F(ld.Centre) + " still carries " + ld.Markers.Count +
+                                         " marker(s) after " + unchecked(upd - ld.ReleaseUpdate) + " updates");
+                        continue;
+                    }
+                    if (ld.Stage == DropStage.Active) active++;
+                    if (ld.Stage == DropStage.Active)
+                    {
+                        int alive = 0;
+                        for (int k = 0; k < ld.Markers.Count; k++) if (LaneClosureMarkers.Alive(em, ld.Markers[k])) alive++;
+                        if (alive == 0) problems.Add("traffic: e" + et.Edge.Index + " dropped lane at lateral " + RRWLog.F(ld.Centre) + " is active without a live marker");
+                    }
+                }
+                if (active > 0 && buildings > 0)
+                    problems.Add("traffic: e" + et.Edge.Index + " lane drop next to " + buildings + " connected building(s)");
+                if (rec?.Upgrade != null && rec.Upgrade.BlockersRegistered)
+                {
+                    var st = rec.Upgrade;
+                    for (int i = 0; i < st.DropLanes.Count; i++)
+                    {
+                        var ld = et.Find(st.DropLanes[i], false);
+                        if (ld == null || ld.Stage != DropStage.Active)
+                        {
+                            problems.Add("traffic: e" + et.Edge.Index + " drop report says registered but lane " + RRWLog.E(st.DropLanes[i]) + " is " + (ld == null ? "untracked" : ld.Stage.ToString()));
+                            break;
+                        }
+                    }
+                }
+                foreach (var kv in et.ParkingReturning)
+                    if (unchecked(upd - kv.Value.Update) > (uint)RRWConst.kCompletionMachineWaitUpdatesHard)
+                    {
+                        problems.Add("traffic: e" + et.Edge.Index + " new parking lane " + RRWLog.E(kv.Key) + " still switched off " + unchecked(upd - kv.Value.Update) +
+                                     " updates after it was due back in use");
+                        break;
+                    }
+                if (rec?.Upgrade != null && rec.Upgrade.DropLanes.Count > 0 && !rec.Upgrade.DropCentresWritten)
+                    problems.Add("traffic: e" + et.Edge.Index + " drop report lists " + rec.Upgrade.DropLanes.Count + " lane(s) but " + rec.Upgrade.DropLaneCentres.Count + " centre(s)");
+                if (rec?.Upgrade != null && rec.Upgrade.DropWindow >= 0 && rec.Upgrade.DropTail != rec.Upgrade.TailRevision && unchecked(upd - rec.Upgrade.DropReportUpdate) > 2)
+                    problems.Add("traffic: e" + et.Edge.Index + " drop report key belongs to tail " + rec.Upgrade.DropTail + " (now " + rec.Upgrade.TailRevision + ")");
+            }
+            if (TrafficState.ForbiddenEverUsed)
+                foreach (var kv in SiteRegistry.Projects)
+                    if (kv.Value.Mode == VisualMode.HalfWidth)
+                        for (int i = 0; i < kv.Value.Edges.Count; i++)
+                        {
+                            TrafficUtil.LanesInto(em, kv.Value.Edges[i], s_Lanes);
+                            for (int k = 0; k < s_Lanes.Count; k++)
+                                if (TrafficState.ForbiddenSnap.ContainsKey(s_Lanes[k]))
+                                {
+                                    problems.Add("traffic: p" + kv.Key + " upgrade works carry Forbidden of ours on e" + kv.Value.Edges[i].Index);
+                                    k = s_Lanes.Count;
+                                }
+                        }
         }
     }
 }

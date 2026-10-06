@@ -15,6 +15,8 @@ namespace RealisticRoadWorks.V3.Props
     // same reduced fraction always gives the same chain u.
     // Teardown: from the last phase's barrier pick-up (StartBarrierKeep < 1, f > .90) every crew but crew 0 has driven
     // out, so its depot is gone; crew 0's set follows the start barriers as with a single crew.
+    // Upgrade works (mode H): the crews are the bands of one window and work side by side over the same chain, not in sections,
+    // so there are no depots; crew 0's set stands on a free strip of the lead band (PropUpgrade.cs).
     public static class PropCrewLayout
     {
         // reduced fractions a/b, 0 < a < b <= kMaxCrewsPerProject (6), in a fixed order: depot id = index
@@ -74,6 +76,7 @@ namespace RealisticRoadWorks.V3.Props
         public static int DepotFill(in ProjectView v, int i, int k, float startKeep)
         {
             int n = v.CrewCount;
+            if (v.IsUpgrade) return -1;   // band crews share the chain: no section depots
             if (n <= 1 || i <= 0 || i >= n || k < 0 || k >= kDepotSlots) return -1;
             if (v.Phase == WorksPhase.Complete || v.Phase == WorksPhase.None) return -1;
             if (PhasePlan.SlotCount(PropGroup.CrewProps, v) < kDepotSlots) return -1;
@@ -83,7 +86,7 @@ namespace RealisticRoadWorks.V3.Props
         }
 
         // Upper bound of depot props a view can show (global prop budget estimate): 5 per interior boundary.
-        public static int DepotEstimate(in ProjectView v) => v.CrewCount > 1 ? 5 * (v.CrewCount - 1) : 0;
+        public static int DepotEstimate(in ProjectView v) => !v.IsUpgrade && v.CrewCount > 1 ? 5 * (v.CrewCount - 1) : 0;
 
         // Can group g give ANY slot a fill >= 1 in this view? Mirrors the guards at the head of each PhasePlan.PropFill case.
         // Used ONLY to skip whole groups in front-only diffs (PropSystem.FrontDiff); every full diff verifies it against the
@@ -92,6 +95,8 @@ namespace RealisticRoadWorks.V3.Props
         {
             var ph = v.Phase;
             if (ph == WorksPhase.Complete) return false;
+            // upgrade works: project-level edge cones (Dressing) and crew props only; band heaps are not slot groups
+            if (v.IsUpgrade) return g == PropGroup.EdgeCones || g == PropGroup.CrewProps;
             bool A = v.Mode == VisualMode.FullDig;
             bool constr = v.Kind == WorksKind.Construction;
             switch (g)

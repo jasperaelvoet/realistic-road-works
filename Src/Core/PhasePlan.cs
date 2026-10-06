@@ -77,6 +77,13 @@ namespace RealisticRoadWorks.V3
         // ---- road rollers (ProjectRecord.View() copies it; Simple(): 0 = no rollers = the plans without rollers, bit for bit)
         public int Rollers;             // most rollers per crew this phase (ProjectRecord.Rollers, latched with Crews: RRWSetting.RollersOn ?
                                         // kMaxRollersPerCrew : 0). Crew() plans roller slots only when > 0 (and moves the C3 crew truck back)
+        // ---- upgrade works (ProjectRecord.View() fills it for a mode H project; default everywhere else, Simple() included)
+        public UpgradeView Upgrade;
+
+        // A mode H project with its upgrade data: every PhasePlan rule that takes a view takes its mode H branch. False for every
+        // other project (and for a HalfWidth view without upgrade data, which keeps the view rules of before). Closure,
+        // MachinesHoldRoad and Wear take a mode, not a view: they treat every HalfWidth project as mode H.
+        public bool IsUpgrade => Mode == VisualMode.HalfWidth && Upgrade.WindowCount > 0;
 
         // Number of crew sections (>= 1, <= kMaxCrewsPerProject).
         public int CrewCount => Crews <= 1 ? 1 : math.min(Crews, RRWConst.kMaxCrewsPerProject);
@@ -84,14 +91,17 @@ namespace RealisticRoadWorks.V3
         public int CancelCrewCount => PhasePlan.CancelCrewsOf(Flags);
         // Front of crew i (section i). One crew: exactly Front.
         public float CrewFront(int i) => PhasePlan.CrewFront(this, i);
-        // Machine seconds of the current phase (0 = unknown).
-        public float PhaseSeconds => WorkSeconds > 0f ? WorkSeconds * (PhasePlan.PhaseEnd(Phase) - PhasePlan.PhaseStart(Phase)) : 0f;
+        // Machine seconds of the current phase (0 = unknown). Upgrade works: of the lead band's equivalent phase in its window.
+        public float PhaseSeconds => IsUpgrade ? PhasePlan.UpgradePhaseSeconds(this, Upgrade.LeadBand(Upgrade.LayoutWindow))
+                                   : WorkSeconds > 0f ? WorkSeconds * (PhasePlan.PhaseEnd(Phase) - PhasePlan.PhaseStart(Phase)) : 0f;
 
         // Main front F (stage-aware in C4 when the side swap runs).
         public float Front => PhasePlan.MainFront(this);
-        // The C4 per-half layout is in use (staged construction, mode A, C4, a car half allowed).
-        public bool HalvesActive => Kind == WorksKind.Construction && Mode == VisualMode.FullDig && Phase == WorksPhase.Finishing
-                                    && Ctx.Staged && Ctx.CarHalfAllowed;
+        // The C4 per-half layout is in use (staged construction, mode A, C4, a car half allowed), or the re-marking window of
+        // upgrade works runs the Half primitive (the same C4a / C4b layout on the existing road).
+        public bool HalvesActive => (Kind == WorksKind.Construction && Mode == VisualMode.FullDig && Phase == WorksPhase.Finishing
+                                     && Ctx.Staged && Ctx.CarHalfAllowed)
+                                    || (IsUpgrade && Upgrade.RemarkHalf);
         // C4a -> C4b side swap in use.
         public bool SwapActive => HalvesActive && Ctx.SwapOn;
         public bool Cancelled => (Flags & SiteFlags.CancelledBuild) != 0 && CancelPhase != WorksPhase.None;
@@ -201,6 +211,15 @@ namespace RealisticRoadWorks.V3
                                          // in-lane devices (divider, closed-end lines, signs, amber head) may stand
         public bool OpenEntryAtEnd;      // the open half's traffic enters the works at the chain END (Trim1) (else at Trim0); the
                                          // closed direction enters at the other end (chase beacons on that barrier line)
+        // ---- upgrade works (PhasePlan.Props of a mode H view; all zero / false otherwise). The fields above keep their meaning
+        // for the Half / Carriageway windows (closed-end lines across the works half, divider, signs, kerb fences, amber head);
+        // the band devices below are laid out by Props from the bands' sub-strips (UpgradeEdgeState.SubStrips).
+        public bool Upgrade;             // a mode H plan
+        public byte BandMask;            // chain bands that get the window's devices now (UpgradeView.Band(i); AllAtOnce: every build band)
+        public byte WaitingMask;         // build bands of later windows: open road, cones along their edge only (EdgeCones)
+        public BandDevices Devices;      // band devices wanted now (in-lane ones also need InLaneReady, or for lane drops the edge's
+                                         // UpgradeEdgeState.BlockersRegistered)
+        public DividerStyle BandDivider; // Divider device style: Barriers for lane drops, Cones otherwise (Props: barriers from 60 km/h)
     }
 
     // What one crew role should be doing. U is the PIVOT anchor in chain u (Machines clamps it inside the
@@ -248,6 +267,15 @@ namespace RealisticRoadWorks.V3
         public float BaseSlotU;    // TruckA base slot (start side for LoadAtFront phases, end side for DumpAtFront phases)
         public float BaseSlotUB;   // TruckB base slot (separate lane)
         public float BaseLateralA, BaseLateralB;
+        // ---- upgrade works (PhasePlan.Crew of a mode H view)
+        public bool LateralMetres; // every CrewSlot.Lateral / BaseLateral of this plan is in METRES, chain frame (inside the band's
+                                   // machine-safe range UpgradeView.Band(Band).SafeLo..SafeHi); false = the floor fractions above (also
+                                   // the re-marking crew of upgrade works, which uses the C4 layout)
+        public int Band;           // mode H: chain band the crew works (UpgradeView.Band(Band); -1 = none); unused on other plans
+        public bool SmallMachines; // mode H: the band is narrower than kUwExcavatorMinWidth: the excavator role is the mini excavator
+        public bool FrontLoad;     // mode H loading phases (Excavation, BreakUp, Removal) with an excavator: TruckA (and TruckB) load in
+                                   // line AHEAD of it at its lateral, tail towards it (the excavator dumps to the front, slew within
+                                   // the limit); the trucks wait at the chain-end slots BaseSlotU / BaseSlotUB (EndSlotIn 1 / 2)
 
         public CrewSlot Get(MachineRole r)
         {
@@ -283,7 +311,7 @@ namespace RealisticRoadWorks.V3
     // The v3 timeline as pure functions. No ECS, no allocation: safe in jobs.
     // Chain coordinate u runs 0..U along the project chain; every per-edge function maps it through
     // the edge's [ChainU0, ChainU1] range.
-    public static class PhasePlan
+    public static partial class PhasePlan
     {
         // ------------------------------------------------------------------ phases
 
@@ -397,6 +425,7 @@ namespace RealisticRoadWorks.V3
         // Main front of a project view (stage-aware: during Vacate the C4a front stays at U).
         public static float MainFront(in ProjectView v)
         {
+            if (v.IsUpgrade) return UpgradeMainFront(v);
             if (v.Phase != WorksPhase.Finishing) return MainFront(v.Phase, v.F, v.U);
             // without the swap the plain sweep, never below the C4a front already painted (monotonic in C4)
             if (!v.SwapActive) return math.max(MainFront(v.Phase, v.F, v.U), math.clamp(v.Ctx.FrontFloor, 0f, v.U));
@@ -487,6 +516,7 @@ namespace RealisticRoadWorks.V3
         // halves are staged (ProjectView.HalvesActive, dev switch RRWGates.HalfCovers); spans from SurfaceSpanHalf.
         public static SurfaceBand BandOf(SurfaceLayer l, in ProjectView v)
         {
+            if (v.IsUpgrade) return UpgradeBandOf(l, v);
             if ((l == SurfaceLayer.FreshAsphalt || l == SurfaceLayer.FreshAsphaltCover) && v.HalvesActive && RRWGates.HalfCovers)
                 return SurfaceBand.CarriageHalf;
             return BandOf(l);
@@ -503,8 +533,10 @@ namespace RealisticRoadWorks.V3
             }
         }
 
-        public static bool IsRaisedQueue(SurfaceLayer l) => l == SurfaceLayer.BaseCourseCover || l == SurfaceLayer.FreshAsphaltCover || l == SurfaceLayer.TempMarking;
-        public static bool IsRoadsLayer(SurfaceLayer l) => l == SurfaceLayer.BaseCourseCover || l == SurfaceLayer.FreshAsphalt || l == SurfaceLayer.FreshAsphaltCover || l == SurfaceLayer.TempMarking;
+        public static bool IsRaisedQueue(SurfaceLayer l) => l == SurfaceLayer.BaseCourseCover || l == SurfaceLayer.FreshAsphaltCover || l == SurfaceLayer.TempMarking
+                                                            || l == SurfaceLayer.RoadDirt;
+        public static bool IsRoadsLayer(SurfaceLayer l) => l == SurfaceLayer.BaseCourseCover || l == SurfaceLayer.FreshAsphalt || l == SurfaceLayer.FreshAsphaltCover || l == SurfaceLayer.TempMarking
+                                                           || l == SurfaceLayer.RoadDirt;
 
         // Layers that become fading scars at Completing (Surfaces re-tags them RRWDerived{site = Null, group Scar}).
         // Construction keeps only the VERGE layers (topsoil, subgrade), fading out within kVergeEndHours (~1 h).
@@ -528,6 +560,7 @@ namespace RealisticRoadWorks.V3
         // One crew (and a one-crew cancel layout): the single-front span.
         static Span SurfaceSpanSingle(SurfaceLayer layer, in ProjectView v)
         {
+            if (v.IsUpgrade) return UpgradeSpanHull(layer, v);
             float U = v.U;
             if (v.Mode != VisualMode.FullDig || U <= 0f) return Span.Empty;
             var ph = v.Phase;
@@ -751,6 +784,7 @@ namespace RealisticRoadWorks.V3
         // (vanilla maintenance may repair it in between).
         public static float Wear(in PlanInput s)
         {
+            if (s.Mode == VisualMode.HalfWidth) return -1f;   // every HalfWidth site (upgrade works): vanilla wear (the bands are decals)
             var ph = PhaseOf(s.Kind, s.P, out float f);
             if (s.Mode == VisualMode.Minimal)
             {
@@ -776,6 +810,7 @@ namespace RealisticRoadWorks.V3
         // OpenLanes at once. During a switch (Swap / Drain) the closed-end lines are down (BarrierStyle.None).
         public static PropPlan Props(in ProjectView v)
         {
+            if (v.IsUpgrade) return UpgradeProps(v);
             var pp = new PropPlan();
             var ph = v.Phase;
             if (ph == WorksPhase.Complete) return pp;
@@ -860,6 +895,7 @@ namespace RealisticRoadWorks.V3
         public static int PropFill(PropGroup g, int k, in ProjectView v, in PropPlan plan)
         {
             if (v.Phase == WorksPhase.Complete) return -1;
+            if (v.IsUpgrade) return UpgradePropFill(g, k, v, plan);
             float u = SlotU(g, k, v);
             // = v.Front except C4b with the swap (C4a pick-ups stay picked up). With crews: the per-section fronts of that
             // front (FrontSet): "the front passed x" = the front of the section holding x passed it; one crew = the single-front numbers.
@@ -939,6 +975,7 @@ namespace RealisticRoadWorks.V3
         // [u - 3, u + 3] still lies in its section (one crew: any slot, the single-crew rule). NaN = none (Machines: F_i + 6).
         public static float ActiveDumpSlot(in ProjectView v, int crew)
         {
+            if (v.IsUpgrade) return UpgradeDumpSlot(v, crew);
             int nC = v.CrewCount;
             crew = math.clamp(crew, 0, nC - 1);
             float F = CrewFront(v, crew);
@@ -1005,6 +1042,7 @@ namespace RealisticRoadWorks.V3
         // chain ends within its speed limit).
         public static CrewPlan Crew(in ProjectView v, int crew)
         {
+            if (v.IsUpgrade) return UpgradeCrew(v, crew);
             var c = new CrewPlan();
             var ph = v.Phase;
             int n = v.CrewCount;
@@ -1125,51 +1163,8 @@ namespace RealisticRoadWorks.V3
                         break;
                     }
                     case WorksPhase.Finishing:
-                    {
-                        // The whole C4 crew works in the works half (kStagedWorksHalf), so the other half opens
-                        // to traffic as soon as Machines report it clear (PhasePlan.OpenLanes). The early leavers drive to the
-                        // connected chain end along the works half; the painter paints from the works half.
-                        // With the side swap, C4a = works half kStagedWorksHalf; the C4a crew drives out at
-                        // f in [kC4aPaintF1, kC4SwapF) (Vacate); C4b mirrors the laterals (-kWorksLane) and paints U*Sweep(f, .47, .86).
-                        // Machines map the fraction onto the half relative to EdgeSection.DirSplit.
-                        // Teardown (f >= kC4TeardownF): crew 0's crew truck stands at the start barriers (lo + 4, f .90-.98;
-                        // it returns in time: ReturnAware towards StartSlot 0), the LAST crew's painter at the end barriers
-                        // (hi - 14, f .90-.98; it finished its sweep right there); everyone else drives out; all leave at f .98.
-                        int idx = v.SwapActive ? StageIndexOf(v) : 0;
-                        float lat0 = (RRWConst.kStagedWorksHalf & RoadZones.RightHalf) != 0 ? kWorksLane : -kWorksLane;
-                        float lat = idx == 1 ? -lat0 : lat0;
-                        bool vacate = v.SwapActive && idx == 0 && f >= RRWConst.kC4aPaintF1;
-                        bool teardown = f >= RRWConst.kC4TeardownF;
-                        bool gone = f >= 0.98f;
-                        float s0 = StartSlotIn(0, lo, hi);
-                        if (vacate)
-                        {
-                            c.Finisher = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
-                            c.CrewTruck = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
-                        }
-                        else if (!teardown)
-                        {
-                            c.Finisher = Slot(MachineActivity.Paint, F + lead, lat, 1);
-                            float follow = math.max(s0, F - 15f);
-                            if (first) follow = math.max(s0, ReturnAware(v, F - 15f, s0, RRWConst.kC4TeardownF, MachineRole.CrewTruck));
-                            c.CrewTruck = Slot(MachineActivity.Follow, follow, lat, 1);
-                        }
-                        else
-                        {
-                            c.Finisher = last && !gone ? Slot(MachineActivity.Parked, hi - 14f, lat, 1)        // end barriers
-                                                       : Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
-                            c.CrewTruck = first && !gone ? Slot(MachineActivity.Parked, lo + 4f, lat, -1)       // start barriers
-                                                         : Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
-                        }
-                        if (f < 0.1f && idx == 0)
-                        {
-                            // the C3 feed trucks leave (the grader already left in C3)
-                            c.TruckA = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
-                            c.TruckB = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
-                        }
-                        c.BaseSlotU = EndSlotIn(1, lo, hi); c.BaseSlotUB = EndSlotIn(2, lo, hi);
+                        C4Crew(ref c, v, F, f, lo, hi, first, last, exit, exitFacing, lead);
                         break;
-                    }
                 }
             }
             else
@@ -1213,12 +1208,62 @@ namespace RealisticRoadWorks.V3
             return c;
         }
 
+        // The C4 (markings) plan of one crew: the painter and its crew truck in the works half (also the re-marking window of
+        // upgrade works, which runs the same C4a / C4b layout on the existing road). Laterals are fractions like the rest of Crew().
+        static void C4Crew(ref CrewPlan c, in ProjectView v, float F, float f, float lo, float hi, bool first, bool last, float exit,
+                           sbyte exitFacing, float lead)
+        {
+            // The whole C4 crew works in the works half (kStagedWorksHalf), so the other half opens
+            // to traffic as soon as Machines report it clear (PhasePlan.OpenLanes). The early leavers drive to the
+            // connected chain end along the works half; the painter paints from the works half.
+            // With the side swap, C4a = works half kStagedWorksHalf; the C4a crew drives out at
+            // f in [kC4aPaintF1, kC4SwapF) (Vacate); C4b mirrors the laterals (-kWorksLane) and paints U*Sweep(f, .47, .86).
+            // Machines map the fraction onto the half relative to EdgeSection.DirSplit.
+            // Teardown (f >= kC4TeardownF): crew 0's crew truck stands at the start barriers (lo + 4, f .90-.98;
+            // it returns in time: ReturnAware towards StartSlot 0), the LAST crew's painter at the end barriers
+            // (hi - 14, f .90-.98; it finished its sweep right there); everyone else drives out; all leave at f .98.
+            int idx = v.SwapActive ? StageIndexOf(v) : 0;
+            float lat0 = (RRWConst.kStagedWorksHalf & RoadZones.RightHalf) != 0 ? kWorksLane : -kWorksLane;
+            float lat = idx == 1 ? -lat0 : lat0;
+            bool vacate = v.SwapActive && idx == 0 && f >= RRWConst.kC4aPaintF1;
+            bool teardown = f >= RRWConst.kC4TeardownF;
+            bool gone = f >= 0.98f;
+            float s0 = StartSlotIn(0, lo, hi);
+            if (vacate)
+            {
+                c.Finisher = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
+                c.CrewTruck = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
+            }
+            else if (!teardown)
+            {
+                c.Finisher = Slot(MachineActivity.Paint, F + lead, lat, 1);
+                float follow = math.max(s0, F - 15f);
+                if (first) follow = math.max(s0, ReturnAware(v, F - 15f, s0, RRWConst.kC4TeardownF, MachineRole.CrewTruck));
+                c.CrewTruck = Slot(MachineActivity.Follow, follow, lat, 1);
+            }
+            else
+            {
+                c.Finisher = last && !gone ? Slot(MachineActivity.Parked, hi - 14f, lat, 1)        // end barriers
+                                           : Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
+                c.CrewTruck = first && !gone ? Slot(MachineActivity.Parked, lo + 4f, lat, -1)       // start barriers
+                                             : Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
+            }
+            if (f < 0.1f && idx == 0)
+            {
+                // the C3 feed trucks leave (the grader already left in C3)
+                c.TruckA = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
+                c.TruckB = Slot(MachineActivity.DriveOut, exit, lat, exitFacing);
+            }
+            c.BaseSlotU = EndSlotIn(1, lo, hi); c.BaseSlotUB = EndSlotIn(2, lo, hi);
+        }
+
         // ------------------------------------------------------------------ road rollers
 
         // Rollers a crew of section length L plans this phase (0 = none): C2 one, C3 one or two (two from kRollerTwoMinSection), D2
         // one (kRollerInRestore), never in other phases, mode D, short sections or with view.Rollers == 0 (setting off).
         public static int RollerCountFor(in ProjectView v, float sectionLength)
         {
+            if (v.IsUpgrade) return UpgradeRollerCount(v, v.Upgrade.LeadBand(v.Upgrade.LayoutWindow), sectionLength);
             if (v.Rollers <= 0 || v.Mode != VisualMode.FullDig || sectionLength < RRWConst.kMachineMinChain) return 0;
             int max = math.min(v.Rollers, RRWConst.kMaxRollersPerCrew);
             switch (v.Phase)
@@ -1331,6 +1376,7 @@ namespace RealisticRoadWorks.V3
         // Front of crew i (unquantised). One crew: MainFront(view).
         public static float CrewFront(in ProjectView v, int i)
         {
+            if (v.IsUpgrade) return UpgradeBandFront(v, v.Upgrade.CrewBand(i) >= 0 ? v.Upgrade.CrewBand(i) : v.Upgrade.LeadBand(v.Upgrade.LayoutWindow));
             int n = v.CrewCount;
             float mf = MainFront(v);
             if (n <= 1) return mf;
@@ -1361,7 +1407,8 @@ namespace RealisticRoadWorks.V3
         }
 
         // More than one section anywhere in the view (current layout or the cancel layout).
-        public static bool MultiSection(in ProjectView v) => v.CrewCount > 1 || (v.Cancelled && v.CancelCrewCount > 1);
+        // Upgrade works: never (their crews work side by side in bands, not in sections along the chain).
+        public static bool MultiSection(in ProjectView v) => !v.IsUpgrade && (v.CrewCount > 1 || (v.Cancelled && v.CancelCrewCount > 1));
 
         // ---- crew count
 
@@ -1408,12 +1455,16 @@ namespace RealisticRoadWorks.V3
             return math.clamp(n, 1, cap);
         }
 
+        // Upgrade works: one crew per band of the layout window (setup: window 0; teardown: 1), at most maxCrews and
+        // kMaxCrewsPerProject; the crews stand side by side (CrewPlan.Band), never in sections.
         public static int CrewCount(in ProjectView v, int maxCrews) =>
-            CrewCountFor(v.Kind, v.Mode, v.Phase, v.U, v.TrimmedLength, v.WorkSeconds, v.Phase == WorksPhase.Finishing && v.SwapActive, maxCrews);
+            v.IsUpgrade ? UpgradeCrewCount(v, maxCrews)
+                        : CrewCountFor(v.Kind, v.Mode, v.Phase, v.U, v.TrimmedLength, v.WorkSeconds, v.Phase == WorksPhase.Finishing && v.SwapActive, maxCrews);
 
         // Front speed of ONE crew of the view's layout (m/s; 0 = unknown). Machines compares it with MachineLimits (overWork / frontLag).
         public static float CrewFrontSpeed(in ProjectView v) =>
-            SingleFrontSpeed(v.Phase, v.U, v.WorkSeconds, v.Phase == WorksPhase.Finishing && v.SwapActive) / v.CrewCount;
+            v.IsUpgrade ? UpgradeCrewFrontSpeed(v)
+                        : SingleFrontSpeed(v.Phase, v.U, v.WorkSeconds, v.Phase == WorksPhase.Finishing && v.SwapActive) / v.CrewCount;
 
         // Machine seconds from the phase start until the fronts leave their section starts (lead-in of the sweep window).
         public static float LeadInSeconds(in ProjectView v)
@@ -1468,6 +1519,7 @@ namespace RealisticRoadWorks.V3
         public static void SurfaceSpans(SurfaceLayer layer, in ProjectView v, out SpanSet set)
         {
             set = default;
+            if (v.IsUpgrade) { UpgradeSpansAll(layer, v, out set); return; }
             if (!MultiSection(v)) { set.Add(SurfaceSpanSingle(layer, v)); return; }
             float U = v.U;
             if (v.Mode != VisualMode.FullDig || U <= 0f) return;
@@ -1650,10 +1702,23 @@ namespace RealisticRoadWorks.V3
         //  * mode D (no machines): the start closure of the current policy / dependants, as before.
         public static ClosureLevel Closure(WorksKind kind, ClosurePolicy policy, bool dependants, WorksPhase ph, VisualMode projectMode, bool hideWanted, bool carriagewayBusy)
         {
+            // Mode H without the window primitive: the weakest closure (Dressing), for every HalfWidth project (with or without its
+            // upgrade data). The Director passes the primitive through the overload below; this keeps any caller that does not
+            // know it on the safe side.
+            if (projectMode == VisualMode.HalfWidth) return UpgradeClosure(BandTraffic.Dressing, policy, ph, carriagewayBusy);
             if (carriagewayBusy) return ClosureLevel.Closed;
             if (ph == WorksPhase.Complete) return kind == WorksKind.Demolition && hideWanted ? ClosureLevel.Closed : ClosureLevel.Open;
             if (projectMode == VisualMode.FullDig) return ClosureLevel.Closed;
             return StartClosure(kind, policy, dependants);
+        }
+
+        // With the upgrade window primitive (UpgradeView.Traffic): mode H takes its own branch FIRST and never looks at the start
+        // closure or `dependants`; every other mode ignores `upgradePrimitive` (the 7-argument rules, bit for bit).
+        public static ClosureLevel Closure(WorksKind kind, ClosurePolicy policy, bool dependants, WorksPhase ph, VisualMode projectMode, bool hideWanted,
+                                           bool carriagewayBusy, BandTraffic upgradePrimitive)
+        {
+            if (projectMode == VisualMode.HalfWidth) return UpgradeClosure(upgradePrimitive, policy, ph, carriagewayBusy);
+            return Closure(kind, policy, dependants, ph, projectMode, hideWanted, carriagewayBusy);
         }
 
         // Legacy signature (kept so callers compile): same rules with carriagewayBusy = false. The Director must switch
@@ -1669,12 +1734,39 @@ namespace RealisticRoadWorks.V3
         // releasing -> false (a mode-A project is Closed through Closure() anyway).
         public static bool MachinesHoldRoad(VisualMode projectMode, uint releaseSince, int machinesOnCarriageway, uint reportUpdate, uint now, bool capped)
         {
-            if (projectMode != VisualMode.FullDig || releaseSince == 0) return false;
+            // every HalfWidth project without zone data: held like mode A while a machine is on the carriageway (use the zone
+            // overload below)
+            if (projectMode != VisualMode.FullDig && projectMode != VisualMode.HalfWidth || releaseSince == 0) return false;
             if (capped) return false;
             bool fresh = reportUpdate != 0 && unchecked(now - reportUpdate) <= (uint)RRWConst.kMachinesReportStaleUpdates;
             if (!fresh) return true;
             if (unchecked((int)(reportUpdate - releaseSince)) <= 0) return true;   // report predates the release: wait one more
             return machinesOnCarriageway > 0;
+        }
+
+        // Same gate with the machine zones: mode A as above; mode H holds while the fresh report (taken after the release began)
+        // shows a puppet in a zone that is about to open (machineZones & zonesOpening; verge bits never hold), with the same cap.
+        // The Director passes zonesOpening = the groups that are closed now and open with the release (or, at a window switch
+        // in Vacate, the groups the old window hands back).
+        public static bool MachinesHoldRoad(VisualMode projectMode, uint releaseSince, int machinesOnCarriageway, uint reportUpdate, uint now, bool capped,
+                                            RoadZones machineZones, RoadZones zonesOpening)
+        {
+            if (projectMode != VisualMode.HalfWidth) return MachinesHoldRoad(projectMode, releaseSince, machinesOnCarriageway, reportUpdate, now, capped);
+            if (releaseSince == 0 || capped) return false;
+            return MachinesBlockOpening(machineZones, zonesOpening, reportUpdate, releaseSince, now);
+        }
+
+        // A machine report blocks opening `zonesOpening`: no fresh report, a report not newer than `since` (the update the opening
+        // was decided), or a puppet in one of those zones (verge bits never block). Nothing to open (no lane-group bit in
+        // zonesOpening) never blocks. Pure; the window switches of upgrade works use it in Vacate with since = the update the
+        // switch began.
+        public static bool MachinesBlockOpening(RoadZones machineZones, RoadZones zonesOpening, uint reportUpdate, uint since, uint now)
+        {
+            if ((zonesOpening & RoadZones.AllLanes) == RoadZones.None) return false;
+            bool fresh = reportUpdate != 0 && unchecked(now - reportUpdate) <= (uint)RRWConst.kMachinesReportStaleUpdates;
+            if (!fresh) return true;
+            if (unchecked((int)(reportUpdate - since)) <= 0) return true;
+            return (machineZones & zonesOpening & RoadZones.AllLanes) != 0;
         }
 
         // Staged opening (user request): lane groups of a CLOSED works road that carry traffic anyway, project
@@ -1690,6 +1782,7 @@ namespace RealisticRoadWorks.V3
         [System.Obsolete("Use OpenLanes(view, PhasePlan.Stage(view, ctx), staged, machineZones, fresh, openBefore, softZones)")]
         public static RoadZones OpenLanes(in ProjectView v, bool staged, RoadZones machineZones, bool machinesReportFresh, RoadZones openBefore)
         {
+            if (v.IsUpgrade) return UpgradeOpenLanes(v, Stage(v), machineZones, machinesReportFresh, openBefore, RoadZones.None);
             if (!staged || v.Kind != WorksKind.Construction || v.Cancelled) return RoadZones.None;
             if (v.Phase == WorksPhase.Complete) return openBefore & RoadZones.AllLanes;
             RoadZones want = RoadZones.None;
@@ -1724,6 +1817,7 @@ namespace RealisticRoadWorks.V3
 
         public static StageInfo Stage(in ProjectView v, in StageContext c)
         {
+            if (v.IsUpgrade) return UpgradeStage(v, c);
             var st = new StageInfo { Count = 1, SwitchP = float.NaN, HoldP = float.NaN };
             var ph = v.Phase;
             if (ph == WorksPhase.Complete) { st.Open = v.OpenLanes & RoadZones.AllLanes & ~RoadZones.Parking; return st; }
@@ -1784,6 +1878,7 @@ namespace RealisticRoadWorks.V3
         public static RoadZones OpenLanes(in ProjectView v, in StageInfo st, bool staged, RoadZones machineZones, bool machinesReportFresh,
                                           RoadZones openBefore, RoadZones softZones)
         {
+            if (v.IsUpgrade) return UpgradeOpenLanes(v, st, machineZones, machinesReportFresh, openBefore, softZones);
             if (!staged) return RoadZones.None;
             if (v.Phase == WorksPhase.Complete) return openBefore & RoadZones.AllLanes & ~RoadZones.Parking;
             RoadZones want = st.Open & RoadZones.AllLanes & ~RoadZones.Parking & ~(st.Works | st.Soft | softZones);

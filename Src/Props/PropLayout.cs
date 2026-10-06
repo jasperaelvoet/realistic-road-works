@@ -183,8 +183,10 @@ namespace RealisticRoadWorks.V3.Props
                     return 1 << math.min(4, (level + 1) / 2);         // 1:2 2:2 3:4 4:4 5:8 ...
                 case PropKind.SurveyCone:
                 case PropKind.EdgeCone:
+                case PropKind.BandCone:
                     return level < 2 ? 1 : 1 << math.min(4, level / 2);   // 1:1 2:2 3:2 4:4 ...
                 case PropKind.CentreCone:
+                case PropKind.BandDivider:
                     return level < 3 ? 1 : 2;                         // divider: kCentreConeSpacing -> kDividerFarSpacing
                 default:
                     return 1;
@@ -221,6 +223,72 @@ namespace RealisticRoadWorks.V3.Props
         {
             int n = Estimate(v, level) + fixedCount;
             if (plan.Divider != DividerStyle.None) n += Ceil(DividerCount(v), ThinFactor(PropKind.CentreCone, level));
+            if (plan.Upgrade) n += UpgradeEstimate(v, level, plan);
+            return n;
+        }
+
+        // ---- Upgrade works (mode H) band devices
+
+        public const float kRoadEdgeTol = 0.05f;      // two strips closer than this share a boundary
+        public const float kBandFenceInset = 0.30f;   // band kerb / verge fence: this far from the boundary on the works side
+        public const float kBandConeOffset = 0.30f;   // band edge cones: this far beyond the lane edge
+        public const float kBandEndMargin = 0.15f;    // closed-end line: first / last barrier this far inside the closed part
+        public const float kBandLineJump = 0.5f;      // a fence line breaks where its lateral jumps more than this between edges
+        public const float kBandJumpGap = 0.75f;      // ... with a gap of this much on both sides of the edge boundary
+        public const float kBandSegmentJoin = 0.5f;   // closed parts of neighbouring edges closer than this (chain u) form one segment
+        public const float kDividerBarrierKmh = 60f;  // divider barriers instead of cones from this posted speed
+        public const float kBandHeapHalf = 1.5f;      // half the footprint of a heap (machine-safe strip and keep-out tests)
+        public const float kBandHeapMinWidth = 1.2f;  // a strip narrower than this gets no heap
+        public const float kBandCrewMinWidth = 2.6f;  // crew props stand on a free strip at least this wide (else on the sidewalk)
+        public const float kBandCrewSpacing = 4.2f;   // crew props in a band stand in a row along the road (long side along it)
+
+        // Taper length for a posted speed (real practice: half the speed in km/h, in metres, within kTaperMin..kTaperMax; the
+        // shortest one when the speed is unknown).
+        public static float TaperLength(float kmh) =>
+            kmh > 0f ? math.clamp(RRWConst.kTaperPerKmh * kmh, RRWConst.kTaperMin, RRWConst.kTaperMax) : RRWConst.kTaperMin;
+
+        // Divider barriers instead of cones: lane drops ask for them (PropPlan.BandDivider), and every road from 60 km/h.
+        public static bool BandDividerBarriers(DividerStyle wanted, float kmh) => wanted == DividerStyle.Barriers || kmh >= kDividerBarrierKmh;
+
+        // Chain bands that get devices now: the plan's bands (the applied window's, with AllAtOnce every later build band). In
+        // teardown the plan names the layout window's bands, which keep their devices until the release so the closed ends can be
+        // picked up (PropPlan.StartBarrierKeep / EndBarrierKeep).
+        public static byte UpgradeActiveMask(in ProjectView v, in PropPlan plan) => plan.BandMask;
+
+        static int Bits8(int m) => math.countbits(m & 0xFF);
+
+        // Band devices that are never thinned per site (fences, closed ends, tapers), overestimated: two fence lines and two
+        // segments per active band.
+        public static int UpgradeFixedEstimate(in ProjectView v, in PropPlan plan, float fencePitch)
+        {
+            if (!plan.Upgrade) return 0;
+            int bands = Bits8(UpgradeActiveMask(v, plan));
+            float len = v.TrimmedLength;
+            int n = 0;
+            if ((plan.Devices & (BandDevices.KerbFence | BandDevices.VergeFence)) != 0 && len > 0f)
+                n += bands * 2 * ((int)math.floor(len / math.max(0.5f, fencePitch)) + 6);
+            if ((plan.Devices & BandDevices.ClosedEnd) != 0) n += bands * 2 * 2 * 8;
+            if ((plan.Devices & BandDevices.Taper) != 0) n += bands * 2 * ((int)math.floor(RRWConst.kTaperMax / RRWConst.kTaperConeSpacing) + 1);
+            return n;
+        }
+
+        // Band devices and heaps that thin with the site budget: divider cones, band cones, heaps.
+        public static int UpgradeEstimate(in ProjectView v, int level, in PropPlan plan)
+        {
+            int bands = Bits8(UpgradeActiveMask(v, plan));
+            int waiting = Bits8(plan.WaitingMask);
+            float len = v.TrimmedLength;
+            int n = 0;
+            if ((plan.Devices & BandDevices.Divider) != 0)
+                n += bands * 2 * Ceil((int)(len / RRWConst.kUwDividerSpacing) + 1, ThinFactor(PropKind.BandDivider, level));
+            if ((plan.Devices & BandDevices.EdgeCones) != 0)
+                n += (bands + waiting) * 2 * Ceil((int)(len / RRWConst.kMinimalConeSpacing) + 1, ThinFactor(PropKind.BandCone, level));
+            if ((plan.Devices & BandDevices.CentreCones) != 0)
+                n += Ceil((int)(len / RRWConst.kDividerFarSpacing) + 1, ThinFactor(PropKind.BandCone, level));
+            n += bands * (Ceil(PhasePlan.SlotCount(PropGroup.SpoilHeaps, v), ThinFactor(PropKind.SpoilHeap, level))
+                          + Ceil(PhasePlan.SlotCount(PropGroup.StoneWindrow, v), ThinFactor(PropKind.Windrow, level))
+                          + Ceil(PhasePlan.SlotCount(PropGroup.Rubble, v), ThinFactor(PropKind.Rubble, level))
+                          + math.min(3, PhasePlan.SlotCount(PropGroup.DumpHeaps, v)));
             return n;
         }
 

@@ -46,7 +46,23 @@ namespace RealisticRoadWorks.V3.Props
         // (+1 = the two tall cones), k = slot 0..2. The depot id is the reduced fraction of the boundary, so a boundary two
         // crew layouts share keeps its entities when the crew count is re-latched.
         CrewDepot = 15,
-        Count = 16,
+        // upgrade works (mode H) band devices, laid out from the bands' sub-strips (PropUpgrade.cs). sub = chain band * 4 + role
+        BandDivider = 16,   // cones (sub < 32) / barriers (sub >= 32) along the inner edge of a band's closed part, next to an open lane
+        BandTaper = 17,     // diagonal cones at the approach end of a band's closed part
+        BandEnd = 18,       // barrier line across a band's closed part at each end
+        BandFence = 19,     // fence panels: kerb fence beside an open sidewalk, verge fence on the new road edge of a removed strip
+        BandFenceCone = 20, // a cone at each band fence run end and at each side of an access gap
+        BandCone = 21,      // cones along the lane edges of a band that carries traffic (sub < 32), centre-line cones (sub 32)
+        Count = 22,
+    }
+
+    // Traffic state of one strip of an upgrade works edge for the band devices (PropUpgrade.cs).
+    internal enum StripState : byte
+    {
+        Open = 0,       // carries traffic (or pedestrians) now
+        Draining = 1,   // closed (group closed or lane dropped) but not ready yet: vehicles may still be on it
+        Ready = 2,      // closed and drained (group in WorkZonesReady, or a dropped lane with registered blockers)
+        Free = 3,       // no lane at all: verge, median, terrain outside the new road
     }
 
     // How a prop's Y is found.
@@ -212,6 +228,19 @@ namespace RealisticRoadWorks.V3.Props
         public int CamSampleCount;
         public uint CamSampleKey;
 
+        // ---- Upgrade works (mode H): band devices and band heaps (PropUpgrade.cs)
+        public uint DiffKey;          // structural diff key of this update (ProcessKey)
+        public uint BandKey;          // band device layout cache key (PropSystem m_BandCache)
+        public uint UpgradeKey;       // structural inputs of the band layout of this update (part of the diff key)
+        // band heap fills of the last diff: index chain band * 4 + heap group (spoil, dump, windrow, rubble), then slot k
+        public readonly int[][] BandFillCache = new int[RRWConst.kUwMaxChainBands * 4][];
+        public bool BandFillValid;    // set by a full diff; a front-only diff needs it
+        public int BandDividers, BandTapers, BandEnds, BandFencePanels, BandFenceGaps, BandVergePanels, BandEdgeCones, BandCentreCones, BandHeaps;
+        public int CrewOnBand = -1;   // crew props on a free strip of the lead band (1), on the sidewalk (0), none (-1)
+        public float RoadKmh;         // posted speed of the chain (highest default car lane speed), km/h; 0 = unknown
+        public uint UpgradeSig;       // signature of the band device summary (log line on change)
+        public string UpgradeLine = "";
+
         public void AddSlot(PropSlot s)
         {
             if (Slots.TryGetValue(s.Key, out var old) && old != s) RemoveSlot(s.Key);
@@ -244,6 +273,8 @@ namespace RealisticRoadWorks.V3.Props
             SlotList.Clear();
             HealCursor = 0;
             FillCacheValid = false;
+            BandFillValid = false;
+            BandKey = 0;
         }
     }
 
@@ -252,6 +283,7 @@ namespace RealisticRoadWorks.V3.Props
     {
         public Entity Edge;
         public EdgeRecord Record;
+        public int Index;             // position in ProjectProps.Chain (sorted by Lo)
         public float U0, U1;          // saved chain coordinates of curve t = 0 / t = 1
         public float Lo => math.min(U0, U1);
         public float Hi => math.max(U0, U1);
@@ -278,6 +310,8 @@ namespace RealisticRoadWorks.V3.Props
         public bool LastKnown;
         public uint ResnapAt;         // UpdateIndex at which a delayed re-snap (CPU heightmap readback lag) fires; 0 = none
         public uint ResnapEpoch;
+        public int SpeedRevision = -1;// GeometryRevision SpeedKmh was read for
+        public float SpeedKmh;        // highest default speed of the edge's car lanes (km/h; 0 = none)
     }
 
     // Late-owner requests handed from PropSystem (Mod1) to PropOwnerSystem (Mod4) of the same update (verified in game).

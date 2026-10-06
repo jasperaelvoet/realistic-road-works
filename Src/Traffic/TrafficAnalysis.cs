@@ -379,7 +379,7 @@ namespace RealisticRoadWorks.V3.Traffic
             return em.GetBuffer<ConnectedBuilding>(edge, true).Length;
         }
 
-        // Vehicles in the LaneObject buffers of the edge's car lanes (parked cars excluded).
+        // Vehicles in the LaneObject buffers of the edge's car lanes (parked cars and our lane closure markers excluded).
         // Moving = has Game.Objects.Moving (drain test); stopped = the rest (HardClose waits for both).
         public static int VehiclesOnCarLanes(EntityManager em, Entity edge, out int moving, out int stopped) =>
             VehiclesOnCarLanes(em, edge, null, out moving, out stopped);
@@ -399,7 +399,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 for (int i = 0; i < buf.Length; i++)
                 {
                     var o = buf[i].m_LaneObject;
-                    if (!s_Seen.Add(o) || !em.Exists(o) || em.HasComponent<ParkedCar>(o)) continue;
+                    if (!s_Seen.Add(o) || !em.Exists(o) || em.HasComponent<ParkedCar>(o) || em.HasComponent<TrafficLaneBlocker>(o)) continue;
                     if (em.HasComponent<Moving>(o)) moving++; else stopped++;
                 }
             }

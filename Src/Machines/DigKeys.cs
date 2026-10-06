@@ -88,7 +88,7 @@ namespace RealisticRoadWorks.V3.Machines
         // goes into the dump pick and the swing / return fit like a truck target's (the bucket keeps clear of it).
         public static DigKeys Build(DigArm arm, DigMode mode, float floorH, float gradeH, float bite, float spoilSide, bool haveTruck,
                                     float truckSlew, float truckR, float truckH, in DigTruckBox box, DigKeys fitFrom,
-                                    float spoilSlew = float.NaN, float spoilR = float.NaN, bool spoilBox = false)
+                                    float spoilSlew = float.NaN, float spoilR = float.NaN, bool spoilBox = false, float farShare = 1f)
         {
             var c = new DigKeys { Mode = mode, GradeH = gradeH, HaveTruck = haveTruck, SpoilSide = spoilSide >= 0f ? 1f : -1f };
             if (haveTruck || spoilBox) { c.HasBox = true; c.Box = box; }
@@ -105,6 +105,8 @@ namespace RealisticRoadWorks.V3.Machines
             float rLower = arm.ReachAt(fl + 0.30f, kAttLower);
             c.RFar = math.min(c.RFloorMax * 0.92f, rLower);
             float rNearMin = arm.FrontClear + 0.6f;
+            // mode H front loading: the scrape at grade stops short of the far reach (the truck's tail stands beyond it)
+            if (farShare < 1f) c.RFar = math.min(c.RFar, math.max(rNearMin + 1.0f, c.RFar * math.max(0.3f, farShare)));
             c.RNear = arm.MinReachAt(fl + clear, kAttDrag, rNearMin, math.max(rNearMin, c.RFar - 0.5f));
             float rCurl = arm.MinReachAt(fl + 0.45f, kAttCurl, c.RNear + 0.15f, math.max(c.RNear + 0.15f, c.RFar));
             c.RNear = math.max(c.RNear, rCurl - 0.15f);
@@ -223,13 +225,15 @@ namespace RealisticRoadWorks.V3.Machines
 
         // The spoil reach of a cycle with these inputs (the same RFar as Build): default dump radius (0.8 x RFar),
         // the smallest one (chassis front + 1.5 m) and RFar.
-        public static void SpoilReach(DigArm arm, DigMode mode, float floorH, float gradeH, float bite, out float rDef, out float rMin, out float rFar)
+        public static void SpoilReach(DigArm arm, DigMode mode, float floorH, float gradeH, float bite, out float rDef, out float rMin, out float rFar,
+                                      float farShare = 1f)
         {
             bool brk = mode == DigMode.Break;
             float b = brk ? 0f : math.max(0f, bite);
             float clear = b > 0f ? 0f : RRWConst.kDigTipClear;
             float fl = math.min(gradeH, floorH) - b;
             rFar = math.min(arm.ReachAt(fl + clear, kAttPen) * 0.92f, arm.ReachAt(fl + 0.30f, kAttLower));
+            if (farShare < 1f) rFar = math.min(rFar, math.max(arm.FrontClear + 1.6f, rFar * math.max(0.3f, farShare)));
             rMin = arm.FrontClear + 1.5f;
             rDef = math.max(rMin, 0.8f * rFar);
         }

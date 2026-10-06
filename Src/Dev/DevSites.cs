@@ -89,6 +89,22 @@ namespace RealisticRoadWorks.V3.DevCmds
 
         private static bool Fail(out string error, string msg) { error = msg; return false; }
 
+        // Road index list of the dev 'list' command: "3", "0-4", "0,2,5" (and mixes). False on a bad part.
+        public static bool RoadIndices(string arg, List<int> output)
+        {
+            output.Clear();
+            if (string.IsNullOrEmpty(arg)) return false;
+            foreach (var part in arg.Split(','))
+            {
+                int dash = part.IndexOf('-');
+                if (dash > 0 && TryInt(part.Substring(0, dash), out int lo) && TryInt(part.Substring(dash + 1), out int hi))
+                    for (int i = lo; i <= hi; i++) output.Add(i);
+                else if (TryInt(part, out int one)) output.Add(one);
+                else return false;
+            }
+            return output.Count > 0;
+        }
+
         public static bool TryInt(string s, out int v) => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v);
 
         public static bool TryFloat(string s, out float v)
@@ -190,7 +206,7 @@ namespace RealisticRoadWorks.V3.DevCmds
         public static string F1(float v) => float.IsNaN(v) ? "nan" : v.ToString("0.0", CultureInfo.InvariantCulture);
         public static string F3(float3 v) => "(" + F1(v.x) + "," + F1(v.y) + "," + F1(v.z) + ")";
 
-        public static string ModeCode(VisualMode m) => m == VisualMode.FullDig ? "A" : "D";
+        public static string ModeCode(VisualMode m) => m == VisualMode.FullDig ? "A" : m == VisualMode.HalfWidth ? "H" : "D";
 
         public static void Lines(DevContext ctx, StringBuilder sb)
         {

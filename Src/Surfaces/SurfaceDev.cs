@@ -77,6 +77,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             ctx.Log("rrw surf queues base=" + SurfaceMaterialSystem.CurrentQueue(ctx.World, PrefabNames.BaseCourseCover)
                     + " asphaltCover=" + SurfaceMaterialSystem.CurrentQueue(ctx.World, PrefabNames.FreshAsphaltCover)
                     + " tempMarking=" + SurfaceMaterialSystem.CurrentQueue(ctx.World, PrefabNames.TempMarking)
+                    + " roadDirt=" + SurfaceMaterialSystem.CurrentQueue(ctx.World, PrefabNames.RoadDirt)
                     + (SurfacePalette.kTempMarkingOn ? "" : "(off)")
                     + " agri=" + (SurfaceState.DevAgri ? 1 : 0) + " fade=" + (SurfaceState.FadeBySwap ? "swap" : "spawn"));
             // The yellow-line clones as the renderer sees them, the experimental switch values and the setting
@@ -110,7 +111,7 @@ namespace RealisticRoadWorks.V3.Surfaces
                     {
                         outgoing += es2.Outgoing.Count;
                         for (int l = 0; l < (int)SurfaceLayer.Count; l++)
-                            for (int b = 0; b < EdgeSection.kMaxIntervals; b++)
+                            for (int b = 0; b < es2.Slots; b++)
                             {
                                 int n = es2.PieceCount(l, b);
                                 if (n > 1) multi++;
@@ -309,10 +310,106 @@ namespace RealisticRoadWorks.V3.Surfaces
         }
     }
 
+    // Upgrade works: per edge and sub-strip of every band, the cover it has now and the layers on screen (one line each).
+    public sealed class SurfUpgradeCommand : IDevCommand
+    {
+        public string Name => "rrw.surf.uw";
+        public string Help => "rrw.surf.uw [project#] - upgrade works surfaces: per edge the band data state, then one line per sub-strip"
+                              + " (band, kind, laterals, cover now, layers on screen with their spans); ends with the upgrade check result";
+
+        public void Run(DevContext ctx, string[] a)
+        {
+            var em = ctx.EntityManager;
+            uint only = a.Length > 0 ? (uint)DevContext.I(a[0].TrimStart('#', 'p')) : 0u;
+            int projects = 0;
+            var ids = new List<uint>(SiteRegistry.Projects.Keys);
+            ids.Sort();
+            foreach (var id in ids)
+            {
+                if (only != 0 && id != only) continue;
+                var p = SiteRegistry.Projects[id];
+                var v = p.View();
+                if (!v.IsUpgrade) continue;
+                projects++;
+                var u = v.Upgrade;
+                ctx.Log("rrw surf uw p" + id + " " + (u.InSetup ? "setup" : u.InTeardown ? "teardown" : "window " + u.Window + "/" + u.WindowCount)
+                        + " " + u.Traffic + " zones=" + RoadZoneMath.Describe(u.Zones) + " preClosed=" + RoadZoneMath.Describe(u.PreClosed)
+                        + " applied=w" + u.AppliedWindow + " " + u.AppliedTraffic + " " + RoadZoneMath.Describe(u.AppliedZones) + (u.Vacating ? " (vacating)" : "")
+                        + " preCover=" + u.PreCover + " allAtOnce=" + u.AllAtOnce + " halves=" + v.HalvesActive
+                        + " coverBand=" + PhasePlan.BandOf(SurfaceLayer.FreshAsphaltCover, v) + " oldAsphalt=" + RRWGates.UpgradeOldAsphalt);
+                foreach (var e in p.Edges)
+                {
+                    if (!SiteRegistry.TryGetEdge(e, out var rec) || rec.Upgrade == null)
+                    {
+                        ctx.Log("rrw surf uw p" + id + " e" + e.Index + " no upgrade edge state");
+                        continue;
+                    }
+                    var ue = rec.Upgrade;
+                    SurfaceState.Edges.TryGetValue(e, out var es);
+                    ctx.Log("rrw surf uw p" + id + " e" + e.Index + " bands=" + ue.BandCount + " chainIndex=" + (ue.ChainIndexCurrent(p.Upgrade) ? "current" : "STALE")
+                            + " subStrips=" + (ue.SubStripsRevision == rec.GeometryRevision && ue.SubStripsTail == ue.TailRevision ? "current" : "STALE")
+                            + (ue.SubStripsFromLayout ? "(layout)" : "(section)") + " closure=" + rec.ClosureApplied
+                            + " appliedOpen=" + RoadZoneMath.Describe(rec.OpenLanesApplied)
+                            + " blockers=" + ue.BlockersRegisteredFor(rec.GeometryRevision, u) + " dropWindow=" + ue.DropWindowFor(rec.GeometryRevision, u)
+                            + " dropCentres=" + (ue.DropCentresWritten ? ue.DropLaneCentres.Count.ToString() : "none")
+                            + " parkingOff=" + ue.ParkingOffCentres.Count + (ue.ParkingOffRevision == rec.GeometryRevision ? "" : "(STALE)")
+                            + " slots=" + (es != null ? es.Slots : 0)
+                            + (es != null && es.EndsValid ? " ends=" + es.Ends.Start + "/" + es.Ends.End + " drawn s=[" + SurfaceDevUtil.F(es.Ends.TrimStart)
+                                                            + "," + SurfaceDevUtil.F(rec.Arc != null ? rec.Arc.Length - es.Ends.TrimEnd : 0f) + "]" : " ends=?"));
+                    for (int i = 0; i < ue.BandCount; i++)
+                    {
+                        int ci = ue.ChainIndex[i];
+                        string band = ci >= 0 && ci < u.BandCount ? u.Band(ci).ToString() : "unmapped";
+                        var strips = ue.SubStrips[i];
+                        for (int k = 0; k < strips.Count; k++)
+                        {
+                            var st = strips[k];
+                            var kind = ue.Bands[i].Kind;
+                            var cover = SurfaceAreaSystem.CoverNow(rec, u, st, i, kind);
+                            string layers = "";
+                            int slot = SurfaceAreaSystem.SlotOf(i, k);
+                            if (es != null && slot < es.Slots)
+                                for (int l = 0; l < (int)SurfaceLayer.Count; l++)
+                                    for (int n = 0; n < es.RowN[l, slot]; n++)
+                                    {
+                                        var t = es.Areas[l, slot, n];
+                                        if (t == null || t.BandKind != SurfaceBand.WorksBand) continue;
+                                        layers += " " + (SurfaceLayer)l + "[" + SurfaceDevUtil.F(t.LS0) + "," + SurfaceDevUtil.F(t.LS1) + "]"
+                                                  + (t.Pending ? "(pending)" : t.Live(em) ? "" : "(DEAD)");
+                                    }
+                            ctx.Log("rrw surf uw p" + id + " e" + e.Index + " band " + i + " " + band + " sub " + k + " " + st.Kind
+                                    + " [" + SurfaceDevUtil.F(st.Lo) + "," + SurfaceDevUtil.F(st.Hi) + "] cover=" + cover
+                                    + (SurfaceAreaSystem.CarriesCars(rec, v, st, i) ? " carsNow" : "")
+                                    + " layers:" + (layers.Length > 0 ? layers : " none"));
+                        }
+                    }
+                    if (es != null && PhasePlan.BandOf(SurfaceLayer.FreshAsphaltCover, v) == SurfaceBand.CarriageHalf)
+                        for (int h = 0; h < 2 && h < es.Slots; h++)
+                        {
+                            string halves = "";
+                            foreach (var l in new[] { SurfaceLayer.FreshAsphalt, SurfaceLayer.FreshAsphaltCover })
+                                for (int n = 0; n < es.RowN[(int)l, h]; n++)
+                                {
+                                    var t = es.Areas[(int)l, h, n];
+                                    if (t != null && t.BandKind == SurfaceBand.CarriageHalf)
+                                        halves += " " + l + "[" + SurfaceDevUtil.F(t.LS0) + "," + SurfaceDevUtil.F(t.LS1) + "]";
+                                }
+                            ctx.Log("rrw surf uw p" + id + " e" + e.Index + " re-marking " + (h == 0 ? "left" : "right") + " half:" + (halves.Length > 0 ? halves : " none"));
+                        }
+                }
+            }
+            var problems = new List<string>();
+            SurfaceIntrospection.CheckUpgrade(em, problems);
+            if (problems.Count == 0) ctx.Log("rrw surf uw check ok (" + projects + " upgrade project(s))");
+            else foreach (var pr in problems) ctx.Log("rrw surf uw FAIL " + pr);
+        }
+    }
+
     public sealed class SurfCheckCommand : IDevCommand
     {
         public string Name => "rrw.surf.check";
-        public string Help => "rrw.surf.check - the Surfaces part of rrw.check (LivePath, tracked areas, cover holes sampled every 0.25 m, piece overlaps / stuck replaced pieces)";
+        public string Help => "rrw.surf.check - the Surfaces part of rrw.check (LivePath, tracked areas, cover holes sampled every 0.25 m, piece overlaps / stuck replaced pieces,"
+                              + " upgrade works: dirt or gravel on a sub-strip that carries cars, a polygon more than 0.3 m into an open lane)";
         public void Run(DevContext ctx, string[] a)
         {
             var problems = new List<string>();

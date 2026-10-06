@@ -65,7 +65,9 @@ namespace RealisticRoadWorks.V3.Director
                 AppendRound3(sb, proj, ps);
                 AppendRound4(sb, proj, ps);
                 AppendRound5(sb, proj, ps);
+                AppendUpgrade(sb, proj, ps);
             }
+            if (rec.Upgrade != null) sb.Append("\ndirector upgrade edge: ").Append(DescribeUpgradeEdge(rec, SiteRegistry.TryGetProject(rec.ProjectId, out var up) ? up.Upgrade : null));
             if (em.Exists(edge) && em.HasComponent<RoadWorksRuntime>(edge))
             {
                 var rt = em.GetComponentData<RoadWorksRuntime>(edge);
@@ -185,6 +187,51 @@ namespace RealisticRoadWorks.V3.Director
               .Append(" c1TreeSweep=").Append(ps != null && ps.C1SweepDone ? "done(" + ps.C1SweepDeleted + " removed)" : "no");
         }
 
+        // Upgrade works state of a project (runtime, window, switch bookkeeping): one line, also used by rrw.uw.dir.
+        internal static void AppendUpgrade(StringBuilder sb, ProjectRecord proj, DirProjectState ps)
+        {
+            var rt = proj.Upgrade;
+            if (rt == null) return;
+            var u = proj.View().Upgrade;
+            sb.Append("\ndirector upgrade #").Append(proj.Id)
+              .Append(" window=").Append(u.InSetup ? "setup" : u.InTeardown ? "teardown" : (u.Window + 1) + "/" + u.WindowCount)
+              .Append(" gw=").Append(RRWLog.F(u.Gw)).Append(" layout=").Append(u.LayoutWindow + 1)
+              .Append(" traffic=").Append(u.Traffic).Append(u.Reason != StageBlockReason.None ? "(" + u.Reason + ")" : "")
+              .Append(u.Vacating ? " applied=" + (u.AppliedWindow + 1) + ":" + u.AppliedTraffic + " " + RoadZoneMath.Describe(u.AppliedZones) : "")
+              .Append(ps != null && ps.UwCarry != RoadZones.None ? " handOver=" + RoadZoneMath.Describe(ps.UwCarry) + " from #" + string.Join(",#", ps.UwCarryFrom) : "")
+              .Append(" zones=").Append(RoadZoneMath.Describe(u.Zones)).Append(" next=").Append(RoadZoneMath.Describe(u.NextZones))
+              .Append(" preClosed=").Append(RoadZoneMath.Describe(u.PreClosed)).Append(" machineSafe=").Append(RoadZoneMath.Describe(u.MachineSafe))
+              .Append(u.AllAtOnce ? " allAtOnce" : "").Append(u.PreCover ? " preCover" : "")
+              .Append(" swapOn=").Append(ps != null && ps.UwSwapOn)
+              .Append(" startDone=").Append(ps == null || ps.UwStartDone == int.MinValue ? "-" : (ps.UwStartDone + 1).ToString())
+              .Append(" swapDone=").Append(ps == null || ps.UwSwapDone == int.MinValue ? "-" : (ps.UwSwapDone + 1).ToString())
+              .Append(" switchFor=").Append(ps != null && proj.Switch != StageSwitch.None ? (ps.UwSwitchIsSwap ? "swap " : "start ") + (ps.UwSwitchWindow + 1) : "-")
+              .Append(" | ").Append(rt.Describe());
+        }
+
+        // Upgrade state of one edge: tail, chain indices, sub-strips, keep-outs and Traffic's drop / parking report.
+        internal static string DescribeUpgradeEdge(EdgeRecord rec, UpgradeRuntime rt)
+        {
+            var eu = rec.Upgrade;
+            if (eu == null) return "none";
+            var sb = new StringBuilder(160);
+            sb.Append(eu.Plan).Append(' ').Append(eu.Class).Append(eu.ChainReversed ? " reversed" : "").Append(" bands=").Append(eu.BandCount)
+              .Append(" tail=").Append(eu.TailRevision).Append(" chainIndex=[");
+            for (int i = 0; i < eu.BandCount; i++) sb.Append(i > 0 ? "," : "").Append(eu.ChainIndex[i]);
+            sb.Append(']').Append(rt != null && eu.ChainIndexCurrent(rt) ? "" : "(stale)")
+              .Append(" subStrips=[");
+            for (int i = 0; i < eu.BandCount; i++) sb.Append(i > 0 ? "," : "").Append(eu.SubStrips[i].Count);
+            sb.Append("] from=").Append(eu.SubStripsFromLayout ? "layout" : "section").Append(eu.SubStripsRevision == rec.GeometryRevision ? "" : "(stale)")
+              .Append(" lanes=").Append(eu.CrossSection.Count)
+              .Append(" keepOuts=").Append(eu.DrivewayKeepOut.Count)
+              .Append(" drop=").Append(eu.DropWindow == -2 ? "none" : "w" + (eu.DropWindow + 1) + " lanes=" + eu.DropLanes.Count + (eu.DropApplied ? " applied" : "")
+                                       + (eu.BlockersRegistered ? " registered" : "") + (eu.DropIntrusion ? " INTRUSION" : "") + " clean=" + eu.DropCleanChecks
+                                       + (eu.DropCentresWritten ? "" : " noCentres"))
+              .Append(" parkingOff=").Append(eu.ParkingOffLanes.Count);
+            for (int i = 0; i < eu.BandCount; i++) sb.Append(" | ").Append(eu.Bands[i].ToString());
+            return sb.ToString();
+        }
+
         internal static string ChainVerdictText(ProjectRecord proj)
         {
             var r = PhasePlan.ChainCarHalfBlock(proj.ExitAtStart, proj.ExitAtEnd, RRWGates.DeadEndRule);
@@ -238,7 +285,9 @@ namespace RealisticRoadWorks.V3.Director
                     // A mode-A project is Closed for the whole works and until its machines have left
                     if (RRWDebug.On(DebugLayers.Closure) && proj.Mode == VisualMode.FullDig && rt.m_Phase != WorksPhase.Complete && rt.m_ClosureTarget != ClosureLevel.Closed)
                         problems.Add("director: U3 mode-A project #" + proj.Id + " edge " + RRWLog.E(e) + " is " + rt.m_ClosureTarget + " in " + rt.m_Phase + " (must stay Closed mid-works)");
-                    if (ps != null && ps.Hold && rt.m_ClosureTarget != ClosureLevel.Closed && RRWDebug.On(DebugLayers.Closure))
+                    // (upgrade works with every lane group open again have nothing left to hold)
+                    bool upgradeAllOpen = WorksDirectorSystem.IsUpgradeProject(proj) && (proj.OpenLanes & RoadZones.AllLanes) == RoadZones.AllLanes;
+                    if (ps != null && ps.Hold && !upgradeAllOpen && rt.m_ClosureTarget != ClosureLevel.Closed && RRWDebug.On(DebugLayers.Closure))
                         problems.Add("director: U3 project #" + proj.Id + " edge " + RRWLog.E(e) + " target " + rt.m_ClosureTarget + " while machines hold the road");
                     if (proj.Releasing && ps != null && !ps.OpenedAfterRelease
                         && (proj.ReleaseSimAge > RRWConst.kCompletionMachineWaitSimFrames + 60 || now - proj.ReleaseSince > RRWConst.kCompletionMachineWaitUpdatesHard + 60))
@@ -285,6 +334,62 @@ namespace RealisticRoadWorks.V3.Director
             CheckRound3(em, problems);
             CheckRound4(em, problems);
             CheckRound5(em, problems);
+            CheckUpgrade(em, problems);
+        }
+
+        // Upgrade works (mode H), Director-owned rules: every line must be 0.
+        private static void CheckUpgrade(EntityManager em, List<string> problems)
+        {
+            uint now = RRWClock.UpdateIndex;
+            foreach (var proj in SiteRegistry.Projects.Values)
+            {
+                bool anyH = false, anyA = false;
+                for (int i = 0; i < proj.Edges.Count; i++)
+                {
+                    Entity e = proj.Edges[i];
+                    if (!em.Exists(e) || !em.HasComponent<RoadWorksSite>(e)) continue;
+                    var s = em.GetComponentData<RoadWorksSite>(e);
+                    anyH |= WorksDirectorSystem.IsUpgradeSite(s);
+                    anyA |= s.Mode == VisualMode.FullDig;
+                }
+                if (anyH && anyA) problems.Add("director: upgrade project #" + proj.Id + " mixes excavation (FullDig) and upgrade sites");
+                if (anyH && !anyA && proj.Upgrade == null) problems.Add("director: upgrade project #" + proj.Id + " has upgrade sites but no upgrade runtime");
+                var rt = proj.Upgrade;
+                if (rt == null) continue;
+                var ps = proj.Get<DirProjectState>(ModuleSlot.Director);
+                if (rt.Mismatch > 0) problems.Add("director: upgrade project #" + proj.Id + " " + rt.Mismatch + " edge(s) disagree with the first edge's schedule or bands");
+                for (int w = 0; w < rt.Schedule.N && w < RRWConst.kUwMaxWindows; w++)
+                {
+                    if (rt.Saved[w] == BandTraffic.Undecided) continue;
+                    if (PhasePlan.ClosureStrength(rt.Primitive[w]) > PhasePlan.ClosureStrength(rt.Saved[w]))
+                        problems.Add("director: upgrade project #" + proj.Id + " window " + (w + 1) + " runs " + rt.Primitive[w] + ", stronger than its saved " + rt.Saved[w]);
+                }
+                var open = proj.OpenLanes & RoadZones.AllLanes;
+                if ((rt.MachineSafe & open) != RoadZones.None)
+                    problems.Add("director: upgrade project #" + proj.Id + " machine-safe zones " + (rt.MachineSafe & open) + " are open to traffic");
+                if (!rt.DerivedFresh && ps != null && now - ps.UwDerivedOk > 1)
+                    problems.Add("director: upgrade project #" + proj.Id + " band data (HasCar / safe ranges) stale for " + (now - ps.UwDerivedOk) + " updates");
+                if (rt.AllAtOnce && !RRWGates.UpgradeDrop)
+                    problems.Add("director: upgrade project #" + proj.Id + " still drops every new lane at once while lane drops are switched off");
+            }
+            foreach (var rec in SiteRegistry.Edges.Values)
+            {
+                Entity e = rec.Edge;
+                if (!em.Exists(e) || !em.HasComponent<RoadWorksSite>(e)) continue;
+                var s = em.GetComponentData<RoadWorksSite>(e);
+                if (s.IsUpgrade && (s.Kind != WorksKind.Construction || s.Has(SiteFlags.CancelledBuild)))
+                    problems.Add("director: edge " + RRWLog.E(e) + " carries an upgrade plan on a " + s.Kind + (s.Has(SiteFlags.CancelledBuild) ? " (cancelled)" : "")
+                                 + " site: an upgrade was cancelled");
+                bool h = WorksDirectorSystem.IsUpgradeSite(s);
+                if (!h) continue;
+                if (rec.HiddenApplied || em.HasComponent<Hidden>(e))
+                    problems.Add("director: upgrade edge " + RRWLog.E(e) + " is Hidden (upgrade works are never hidden)");
+                if (rec.Upgrade == null) { problems.Add("director: upgrade edge " + RRWLog.E(e) + " has no upgrade edge state"); continue; }
+                if (!SiteRegistry.TryGetProject(rec.ProjectId, out var proj) || proj.Upgrade == null) continue;
+                var st = rec.Get<DirEdgeState>(ModuleSlot.Director);
+                if (!rec.Upgrade.ChainIndexCurrent(proj.Upgrade) && st != null && now - st.UwChainIndexOk > 1)
+                    problems.Add("director: upgrade edge " + RRWLog.E(e) + " chain index stale for " + (now - st.UwChainIndexOk) + " updates (project #" + proj.Id + ")");
+            }
         }
 
         // Roller latch and chain car-half checks: every line must be 0.
@@ -335,9 +440,11 @@ namespace RealisticRoadWorks.V3.Director
                     problems.Add("director: project #" + proj.Id + " Crews=" + proj.Crews + " outside [1, " + RRWConst.kMaxCrewsPerProject + "]");
                 if (proj.FocusCrew < 0 || proj.FocusCrew >= System.Math.Max(1, proj.Crews))
                     problems.Add("director: project #" + proj.Id + " FocusCrew=" + proj.FocusCrew + " outside the " + proj.Crews + " crews");
-                if (proj.Crews > 1 && (proj.Mode != VisualMode.FullDig || proj.Phase == WorksPhase.Complete))
+                // upgrade works: one crew per band of the layout window, side by side (no sections)
+                bool upgrade = WorksDirectorSystem.IsUpgradeProject(proj);
+                if (proj.Crews > 1 && ((proj.Mode != VisualMode.FullDig && !upgrade) || proj.Phase == WorksPhase.Complete))
                     problems.Add("director: project #" + proj.Id + " has " + proj.Crews + " crews in mode " + proj.Mode + " / " + proj.Phase + " (must be 1)");
-                if (proj.Crews > 1)
+                if (proj.Crews > 1 && !upgrade)
                 {
                     float L = System.Math.Max(0f, proj.TrimU1 - proj.TrimU0);
                     if (L > 0f && L / proj.Crews < RRWConst.kMinSectionLength - 2f * RRWConst.kFrontQuantum)
@@ -371,9 +478,13 @@ namespace RealisticRoadWorks.V3.Director
                     problems.Add("director: R3 project #" + proj.Id + " group(s) " + (proj.OpenLanes & proj.SoftZones) + " both open and soft");
                 if ((proj.WorkZonesReady & (proj.OpenLanes | proj.SoftZones)) != RoadZones.None)
                     problems.Add("director: R3 project #" + proj.Id + " WorkZonesReady " + proj.WorkZonesReady + " contains open/soft group(s) " + (proj.WorkZonesReady & (proj.OpenLanes | proj.SoftZones)));
-                if ((proj.OpenLanes & RoadZones.Parking) != RoadZones.None && proj.Phase != WorksPhase.Complete)
-                    problems.Add("director: R3 project #" + proj.Id + " parking " + (proj.OpenLanes & RoadZones.Parking) + " open during the works (D10)");
-                if (proj.Switch != StageSwitch.None && proj.Phase != WorksPhase.Finishing && proj.Phase != WorksPhase.BreakUp)
+                // upgrade works keep parking open (empty new parking lanes are switched off per lane by Traffic); only the parking
+                // their applied window closes (Half, Carriageway) must stay closed
+                bool upgrade = WorksDirectorSystem.IsUpgradeProject(proj);
+                var parkingClosed = proj.Mode == VisualMode.HalfWidth ? PhasePlan.ParkingKeptClosed(proj.View()) : RoadZones.Parking;
+                if ((proj.OpenLanes & parkingClosed) != RoadZones.None && proj.Phase != WorksPhase.Complete)
+                    problems.Add("director: R3 project #" + proj.Id + " parking " + (proj.OpenLanes & parkingClosed) + " open during the works");
+                if (proj.Switch != StageSwitch.None && proj.Phase != WorksPhase.Finishing && proj.Phase != WorksPhase.BreakUp && !upgrade)
                     problems.Add("director: R3 project #" + proj.Id + " switch " + proj.Switch + " running in " + proj.Phase);
                 if (ps == null) continue;
                 for (int b = 0; b < 16; b++)

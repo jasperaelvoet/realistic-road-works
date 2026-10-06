@@ -33,6 +33,9 @@ using AreaNode = Game.Areas.Node;
 // whole row in one update (SurfacePieces.cs): pieces that only grow are rewritten in place, the rest spawn new, and the replaced
 // areas stay on screen (EdgeSurf.Outgoing) until their row and the covering layer have covered them for >= 1 update (hand-over rule).
 // Bypass work (phase change, ModelReset, NeedsRebuild) is spread over updates per project (whole project at once).
+// Upgrade works (a road replaced by another variant while it stays in use) draw one polygon per band sub-strip instead of the
+// footprint / carriageway bands (SurfaceUpgrade.cs); curing decals and scars under them are clipped to the outside of the
+// build, rebuild and remove bands (SurfaceUpgradeScars.cs).
 // Structural changes only here (Mod1) and in SurfaceTagSystem (Mod4).
 namespace RealisticRoadWorks.V3.Surfaces
 {
@@ -65,6 +68,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         private bool m_TopsoilOn;
         private uint m_LastOrphanSweep;
         private uint m_LastProjSweep;
+        private bool m_IdleSwept;               // the orphan sweep ran since the last work-site texture went away
         private bool m_DevRebuild;
 
         // reusable buffers (no per-frame allocation)
@@ -83,9 +87,10 @@ namespace RealisticRoadWorks.V3.Surfaces
         private readonly SurfaceBand[] m_BandKind = new SurfaceBand[(int)SurfaceLayer.Count]; // PhasePlan.BandOf(layer, view)
         // Desired edge-local pieces per (layer, band slot) of the edge being processed: logical spans (ToEdgeLocal output,
         // merged), only pieces with something to draw (SurfaceGeom.GeometricRange); sorted by s
-        private readonly int[,] m_DCount = new int[(int)SurfaceLayer.Count, EdgeSection.kMaxIntervals];
-        private readonly float[,,] m_DS0 = new float[(int)SurfaceLayer.Count, EdgeSection.kMaxIntervals, EdgeSurf.kMaxPieces];
-        private readonly float[,,] m_DS1 = new float[(int)SurfaceLayer.Count, EdgeSection.kMaxIntervals, EdgeSurf.kMaxPieces];
+        // (upgrade works use up to EdgeSurf.kMaxSlots band slots: one per band sub-strip)
+        private readonly int[,] m_DCount = new int[(int)SurfaceLayer.Count, EdgeSurf.kMaxSlots];
+        private readonly float[,,] m_DS0 = new float[(int)SurfaceLayer.Count, EdgeSurf.kMaxSlots, EdgeSurf.kMaxPieces];
+        private readonly float[,,] m_DS1 = new float[(int)SurfaceLayer.Count, EdgeSurf.kMaxSlots, EdgeSurf.kMaxPieces];
         private readonly HashSet<Entity> m_Restyled = new HashSet<Entity>();
         private readonly EdgeCtx m_Ctx = new EdgeCtx();
         private int m_FrameCompletedEdges, m_FrameRoadLayersRemoved, m_FrameVergeScars;   // per project, this update (completion log)
@@ -122,6 +127,10 @@ namespace RealisticRoadWorks.V3.Surfaces
             public bool Reversed;      // the edge curve runs against the chain (+u)
             public bool ModeA;
             public ProjSurf Ps;        // the project's Surfaces state (row stats)
+            // Upgrade works (the site carries an upgrade plan): one polygon per sub-strip
+            public bool Upgrade;
+            public bool UpgradeReady;  // chain index and sub-strips belong to the current runtime, tail and geometry
+            public UpgradeEdgeState Ue;
         }
 
         // ------------------------------------------------------------------ lifecycle
@@ -156,6 +165,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             SurfaceState.ClearRuntime("game preload");
             m_Guard.Reset();
             m_LastOrphanSweep = m_LastProjSweep = 0;
+            m_IdleSwept = false;
         }
 
         protected override void OnUpdate()
@@ -184,9 +194,19 @@ namespace RealisticRoadWorks.V3.Surfaces
                     && SurfaceState.Scars.Count == 0 && SurfaceState.Retiring.Count == 0 && SurfaceState.Pending.Count == 0
                     && SurfaceState.DevLines.Count == 0 && SurfaceState.DevLineRequests.Count == 0 && SurfaceState.DevLineClear == null)
                 {
+                    // Nothing is tracked any more (the last works finished): the periodic self-heal below stops with this early
+                    // return, so sweep once now. A work-site texture that lost its tracking would otherwise stay on the
+                    // finished road until the next works start somewhere.
+                    if (!m_IdleSwept)
+                    {
+                        m_IdleSwept = true;
+                        m_Em = EntityManager;
+                        SweepOrphans(false, "no works left");
+                    }
                     m_Guard.Ok();
                     return;
                 }
+                m_IdleSwept = false;
                 m_TopsoilOn = settings.TopsoilOn;
                 m_Budget = RRWConst.kAreaRewritesPerUpdateGlobal;
                 SxPerf.Begin(SxT.HeightData);
@@ -369,7 +389,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             foreach (var s in SurfaceState.Scars) { DeleteArea(s.Area); DeleteArea(s.Next); n++; }
             foreach (var r in SurfaceState.Retiring) { EcsUtil.MarkDeleted(m_Em, r.Area); n++; }
             SurfaceState.ClearRuntime(why);
-            SweepOrphans(true);
+            SweepOrphans(true, why);
             if (n > 0) RRWLog.Info("surfaces: removed every work-site texture (" + why + ")");
         }
 
@@ -419,6 +439,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             {
                 m_ClaimedThisFrame.Add(best);
                 var n = new EdgeSurf { Edge = best, ProjectId = es.ProjectId, ChainU0 = bestSite.m_ChainU0, ChainU1 = bestSite.m_ChainU1, Length = rec.Arc.Length };
+                n.EnsureSlots(es.Slots);   // upgrade works rows keep their sub-strip slots
                 for (int l = 0; l < es.Areas.GetLength(0); l++)
                     for (int b = 0; b < es.Areas.GetLength(1); b++)
                         for (int k = 0; k < EdgeSurf.kMaxPieces; k++)
@@ -589,10 +610,16 @@ namespace RealisticRoadWorks.V3.Surfaces
         private bool ProcessProject(ProjectRecord p, ProjSurf ps, bool phaseChanged)
         {
             ps.SeenUpdate = m_Now;
+            var v = p.View();
+            // upgrade works: a window switch moves every band's phase at once (the lead phase alone may not change)
+            if (v.IsUpgrade && ps.UpgradeWindow != v.Upgrade.Window)
+            {
+                phaseChanged |= ps.UpgradeWindow != int.MinValue;
+                ps.UpgradeWindow = v.Upgrade.Window;
+            }
             if (phaseChanged || ps.PhaseSince == 0) ps.PhaseSince = m_Now;
             ps.LastPhase = p.Phase;
             ps.LastKind = p.Kind;
-            var v = p.View();
             for (int l = 0; l < (int)SurfaceLayer.Count; l++)
             {
                 var layer = (SurfaceLayer)l;
@@ -622,6 +649,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             m_FrameLineEdges = m_FrameLineRows = m_FrameLinePieces = 0;
             m_FrameLineWhy = null;
             ps.MaxPieces = 0;
+            BeginUpgradeFrame();
             for (int i = 0; i < p.Edges.Count; i++)
             {
                 Entity e = p.Edges[i];
@@ -643,11 +671,13 @@ namespace RealisticRoadWorks.V3.Surfaces
                 c.ModeA = c.Site.Mode == VisualMode.FullDig && p.Mode == VisualMode.FullDig;
                 c.Es = GetEdge(e, p.Id, c.Site, c.L);
                 c.Ps = ps;
+                UpgradeContext(c);
                 SxPerf.Count(SxC.Edges);
                 ProcessEdge(c, ps, phaseChanged, tickOpen, ref wrote, ref deferred, ref didBypass);
             }
             if (ps.MaxPieces > SurfaceState.MaxPiecesSeen) SurfaceState.MaxPiecesSeen = ps.MaxPieces;
             LogLines(p, ps, v);
+            if (v.IsUpgrade || m_UwWaits > 0) LogUpgrade(p, ps, v);
             // The write tick closes once all of its writes went out; writes held back by the global cap keep it open, so the
             // rest of this tick's front step follows on the next update instead of 15 updates later.
             if (m_FrameCompletedEdges > 0) LogCompletion(p);
@@ -710,19 +740,27 @@ namespace RealisticRoadWorks.V3.Surfaces
             es.RebuildDone = needsRebuild;
             bool bypass = phaseChanged || needsRebuild || ps.ResetLatched || c.Rt.Has(RuntimeFlags.ModelReset) || c.Rec.GeometryChangedUpdate == m_Now;
             if (bypass || rebuild) didBypass = true;
+            if (c.Upgrade && !c.UpgradeReady)
+            {
+                // Band data of the upgrade works is not current yet (adopt, tail or geometry change): keep what is on screen
+                UpgradeWait(c);
+                return;
+            }
+            if (!c.Upgrade && es.Slots > EdgeSection.kMaxIntervals) DropUpgradeRows(es);
             DesiredPieces(c);
             if (es.EndsValid)
             {
                 if (es.Ends.Start == EndKind.WorksJunction && c.Rec.StartNode != Entity.Null) m_JunctionNodes.Add(StartNodeOf(c));
                 if (es.Ends.End == EndKind.WorksJunction && c.Rec.EndNode != Entity.Null) m_JunctionNodes.Add(EndNodeOf(c));
             }
+            int slots = c.Upgrade ? es.Slots : EdgeSection.kMaxIntervals;
             for (int l = 0; l < (int)SurfaceLayer.Count; l++)
             {
                 var layer = (SurfaceLayer)l;
                 if (layer == SurfaceLayer.TempMarking)
                 {
                     // Yellow lines never live in the band slots (the TempRows store holds them): drop any leftover there
-                    for (int b = 0; b < EdgeSection.kMaxIntervals; b++)
+                    for (int b = 0; b < slots; b++)
                     {
                         for (int k = 0; k < es.RowN[l, b]; k++)
                             if (es.Areas[l, b, k] != null) { DeleteArea(es.Areas[l, b, k]); es.Areas[l, b, k] = null; }
@@ -733,13 +771,13 @@ namespace RealisticRoadWorks.V3.Surfaces
                 // While a layer switches its band kind every row of it is written in this update (no throttle), so the
                 // old polygons never go before all new bands exist (e.g. the right half spawned a tick after the left one)
                 bool switching = false;
-                for (int b = 0; b < EdgeSection.kMaxIntervals && !switching; b++)
+                for (int b = 0; b < slots && !switching; b++)
                     for (int k = 0; k < es.RowN[l, b]; k++)
                     {
                         var t = es.Areas[l, b, k];
                         if (t != null && t.BandKind != m_BandKind[l]) { switching = true; break; }
                     }
-                for (int b = 0; b < EdgeSection.kMaxIntervals; b++)
+                for (int b = 0; b < slots; b++)
                 {
                     try { DiffRow(c, layer, b, m_BandKind[l], rebuild, bypass || switching, tickOpen, ref wrote, ref deferred); }
                     catch (Exception e) { RRWLog.ErrorOnce("surfaces diff " + layer, e); }
@@ -758,18 +796,21 @@ namespace RealisticRoadWorks.V3.Surfaces
         private Entity EndNodeOf(EdgeCtx c) => m_Em.HasComponent<Edge>(c.Edge) ? m_Em.GetComponentData<Edge>(c.Edge).m_End : c.Rec.EndNode;
 
         // Junction-end classification (+ own trims), refreshed on geometry / registry changes and every 8 updates (staggered).
+        // Upgrade works keep their road visible: a dead end is clipped to the edge geometry (no round cap over the cul-de-sac).
         private void RefreshEnds(EdgeCtx c)
         {
             var es = c.Es;
             bool need = !es.EndsValid || es.GeomRev != c.Rec.GeometryRevision || es.EndsRegistryRev != SiteRegistry.Revision
-                        || ((m_Now + (uint)c.Edge.Index) & 7u) == 0u;
+                        || es.EndsUpgrade != c.Upgrade || ((m_Now + (uint)c.Edge.Index) & 7u) == 0u;
             if (!need) return;
             SxPerf.Begin(SxT.RefreshEnds);
             SxPerf.Count(SxC.EndsRefresh);
             Entity sn = StartNodeOf(c), en = EndNodeOf(c);
             var ends = es.Ends;
-            ends.Start = SurfaceGeom.ClassifyEnd(m_Em, c.Edge, sn, out ends.CutStart);
-            ends.End = SurfaceGeom.ClassifyEnd(m_Em, c.Edge, en, out ends.CutEnd);
+            var oldStart = es.EndsValid ? ends.Start : EndKind.Visible;
+            var oldEnd = es.EndsValid ? ends.End : EndKind.Visible;
+            ends.Start = SurfaceGeom.ClassifyEnd(m_Em, c.Edge, sn, c.Upgrade, out ends.CutStart);
+            ends.End = SurfaceGeom.ClassifyEnd(m_Em, c.Edge, en, c.Upgrade, out ends.CutEnd);
             uint ch = SurfaceGeom.CornerHash(m_Em, c.Edge);
             if (!es.EndsValid || ch != es.CornerHash || es.GeomRev != c.Rec.GeometryRevision)
             {
@@ -779,8 +820,14 @@ namespace RealisticRoadWorks.V3.Surfaces
             ends.Hash = SurfaceGeom.HashEnds(ends);
             es.Ends = ends;
             es.EndsValid = true;
+            es.EndsUpgrade = c.Upgrade;
             es.GeomRev = c.Rec.GeometryRevision;
             es.EndsRegistryRev = SiteRegistry.Revision;
+            if ((ends.Start == EndKind.OpenDeadEnd && oldStart != EndKind.OpenDeadEnd) || (ends.End == EndKind.OpenDeadEnd && oldEnd != EndKind.OpenDeadEnd))
+                RRWLog.Info("surfaces: upgrade edge " + RRWLog.E(c.Edge) + " (project #" + c.Project.Id + ") dead end at its "
+                            + (ends.Start == EndKind.OpenDeadEnd ? (ends.End == EndKind.OpenDeadEnd ? "both ends" : "start") : "end")
+                            + ": work-site textures stop at the road end (s " + RRWLog.F(ends.TrimStart) + " to " + RRWLog.F(c.L - ends.TrimEnd)
+                            + " of " + RRWLog.F(c.L) + " m), nothing drawn on the cul-de-sac");
             SxPerf.End(SxT.RefreshEnds);
         }
 
@@ -813,13 +860,27 @@ namespace RealisticRoadWorks.V3.Surfaces
                 m_Poly.Clear();
                 return false;
             }
-            c.Rec.Section.Band(kind, layer, band, c.Reversed, RoadZones.None, false, out float left, out float right);
+            float left, right, margin = PhasePlan.MarginOf(layer);
+            if (c.Upgrade)
+            {
+                // upgrade works: the sub-strip exactly, no margin into the neighbouring lanes (the re-marking half keeps the
+                // margin of a new road's half band, tapered at visible junctions)
+                if (!UpgradeLat(c, (int)layer, band, kind, out left, out right))
+                {
+                    m_Poly.Clear();
+                    return false;
+                }
+                if (kind != SurfaceBand.CarriageHalf) margin = 0f;
+            }
+            else c.Rec.Section.Band(kind, layer, band, c.Reversed, RoadZones.None, false, out left, out right);
+            m_LastLatLo = left;
+            m_LastLatHi = right;
             // a C4 half's inner edge (at the split) carries no margin (EdgeSection.HalfBand): never taper it away
             bool half = kind == SurfaceBand.CarriageHalf && c.Rec.Section.TwoDirections;
             bool innerRight = half && ((band == 0) != c.Reversed);
             var lat = new BandLat
             {
-                Left = left, Right = right, Margin = PhasePlan.MarginOf(layer),
+                Left = left, Right = right, Margin = margin,
                 TaperStart = ts, TaperEnd = te, TaperS0 = c.Es.Ends.TrimStart, TaperS1 = c.Es.Ends.TrimEnd,
                 MinWidth = 0f, NoMarginRight = innerRight, NoMarginLeft = half && !innerRight,
             };
@@ -852,7 +913,11 @@ namespace RealisticRoadWorks.V3.Surfaces
             t.FloorAtWrite = c.Floor;
             t.StepAtWrite = c.Gr.m_StepUpdate;
             t.ResnapDue = 0;
+            t.LatLo = m_LastLatLo;
+            t.LatHi = m_LastLatHi;
         }
+
+        private float m_LastLatLo = float.NaN, m_LastLatHi = float.NaN;   // laterals of the last BuildStrip (StampWrite)
 
         private TrackedArea NewStrip(EdgeCtx c, SurfaceLayer layer, int band, SurfaceBand kind) => new TrackedArea
         {

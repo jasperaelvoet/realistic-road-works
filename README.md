@@ -49,6 +49,15 @@ uses the game's own assets, and the save keeps only one small component per road
   mid-works, and the progress carries over.
 - **Replacing a road** with a different type starts the new one at the excavation phase.
 
+### Road upgrades
+
+- Replacing a road with another type builds only what changes: a widening digs, grades and paves just the new strip, a narrowing
+  breaks out just the removed strip, and a lane or marking change is re-marked one direction at a time.
+- Lane by lane: traffic keeps both directions open next to the works on yellow temporary construction markings; only the lanes
+  being built are closed, and machines work only inside the closed strip.
+- On streets with houses every lane, parking spot and driveway stays open (slow zone).
+- Setting "Road upgrades": Realistic, Full rebuild or Instant. Decorations (trees, lights) are always instant.
+
 ### Demolition
 
 - **Bulldozing starts a demolition** instead of deleting the road at once: 24 working hours per kilometre by default, minimum 3 hours.

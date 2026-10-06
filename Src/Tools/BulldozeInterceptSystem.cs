@@ -22,6 +22,10 @@ namespace RealisticRoadWorks.V3.Tooling
     //   - road without a site      -> demolition works (SiteFactory, one project per chain); the vanilla Recent refund
     //                                 (Temp.m_Cost < 0, see the game's CostSystem) is credited here, once
     //   - road under construction  -> CancelEdge / CancelEdgeInstant per edge (the Director splits, cancels / deletes, refunds)
+    //   - road under upgrade works (mode H) -> never a cancel (the road is the new type already): one refund, credited here
+    //                                 (the larger of the unbuilt share of what was paid and the vanilla Recent refund), an
+    //                                 EndUpgrade request (the edge leaves its project, the other edges keep working) and a
+    //                                 normal demolition
     //   - road being demolished    -> ignored
     //   - our decals / props / puppets (RRWDerived or "RRW " area prefabs) are never bulldozed.
     // Mixed selections (roads + other objects) lose the other objects in this action (as in the previous version, logged once).
@@ -42,6 +46,7 @@ namespace RealisticRoadWorks.V3.Tooling
         private readonly List<int> m_RoadCost = new List<int>();
         private readonly List<SiteFactoryEdge> m_Demolish = new List<SiteFactoryEdge>();
         private readonly List<SiteFactoryResult> m_Results = new List<SiteFactoryResult>();
+        private readonly List<WorksRequest> m_EndUpgrade = new List<WorksRequest>();
 
         public static string LastSummary = "none";
 
@@ -145,8 +150,9 @@ namespace RealisticRoadWorks.V3.Tooling
             var settings = RRWSettings.Current;
             if (settings == null) { RRWLog.Once("tools-nosettings-bulldoze", "tools: settings not registered, bulldozer left to vanilla"); return; }
 
-            int cancel = 0, instant = 0, demolishing = 0, outside = 0, refund = 0;
+            int cancel = 0, instant = 0, demolishing = 0, outside = 0, refund = 0, upgradeEnded = 0, upgradeRefund = 0;
             m_Demolish.Clear();
+            m_EndUpgrade.Clear();
             for (int i = 0; i < m_Roads.Count; i++)
             {
                 Entity orig = m_Roads[i];
@@ -154,6 +160,21 @@ namespace RealisticRoadWorks.V3.Tooling
                 {
                     var site = em.GetComponentData<RoadWorksSite>(orig);
                     if (site.Kind == WorksKind.Demolition) { demolishing++; continue; }
+                    if (UpgradeRules.IsModeH(site))
+                    {
+                        // Upgrade works are never cancelled (a cancel would delete a road that already is the new type).
+                        if (ToolUtil.TouchesOutsideConnection(em, orig)) { outside++; continue; }
+                        int share = WorkTime.CancelRefund(math.max(0, site.m_PaidCost), site.Progress, false);
+                        int recent = m_RoadCost[i] < 0 ? -m_RoadCost[i] : 0;
+                        int credit = math.max(share, recent);
+                        upgradeRefund += credit;
+                        upgradeEnded++;
+                        m_EndUpgrade.Add(new WorksRequest { Type = WorksRequestType.EndUpgrade, Edge = orig, Aux = site.m_ProjectId, Value = credit });
+                        m_Demolish.Add(ToolUtil.FactoryEdge(em, orig, 0, ToolUtil.HasDependants(em, orig)));
+                        RRWLog.Verbose("tools: bulldozer on upgrade works " + RRWLog.E(orig) + " p" + site.m_ProjectId + " p=" + RRWLog.F(site.Progress)
+                                       + " refund=" + credit + " (unbuilt share " + share + ", recent " + recent + ")");
+                        continue;
+                    }
                     bool inst = settings.InstantCancelUnfinished && site.Progress < RRWConst.kInstantCancelProgress;
                     WorksRequests.Enqueue(inst ? WorksRequestType.CancelEdgeInstant : WorksRequestType.CancelEdge, orig);
                     if (inst) instant++; else cancel++;
@@ -164,12 +185,14 @@ namespace RealisticRoadWorks.V3.Tooling
                 if (m_RoadCost[i] < 0) refund += -m_RoadCost[i];   // vanilla Recent refund (decays with time): paid once, here
             }
 
-            // Only plain roads at outside connections: nothing for us, vanilla decides.
-            if (m_Demolish.Count == 0 && cancel + instant + demolishing + derived == 0) return;
+            // Only plain roads at outside connections: nothing for us, vanilla decides (never for a road under works).
+            if (m_Demolish.Count == 0 && cancel + instant + demolishing + derived == 0 && !AnySite()) return;
 
             int started = 0;
             if (m_Demolish.Count > 0)
             {
+                // the edges leave their upgrade projects before the demolition sites written below are adopted
+                for (int i = 0; i < m_EndUpgrade.Count; i++) WorksRequests.Enqueue(m_EndUpgrade[i]);
                 ToolUtil.EnsureProjectIds(em, m_Sites);
                 m_Results.Clear();
                 SiteFactory.CreateProjects(m_Demolish, WorksKind.Demolition, EcsUtil.RoadClass(em, m_Demolish[0].Edge), settings, SiteFlags.None, m_Results);
@@ -180,7 +203,7 @@ namespace RealisticRoadWorks.V3.Tooling
                     ToolUtil.PutSite(em, r.Edge, r.Site);
                     started++;
                 }
-                if (refund > 0) EcsUtil.Credit(em, m_CitySystem.City, refund);
+                if (refund + upgradeRefund > 0) EcsUtil.Credit(em, m_CitySystem.City, refund + upgradeRefund);
             }
 
             // Only roads under demolition picked: still swallow the click (vanilla would delete them mid-works).
@@ -191,9 +214,17 @@ namespace RealisticRoadWorks.V3.Tooling
             if (outside > 0)
                 RRWLog.Once("tools-outside-bulldoze", "tools: roads at an outside connection are not demolished by road works");
             LastSummary = "demolition=" + started + " cancel=" + cancel + " instantCancel=" + instant + " alreadyDemolishing=" + demolishing
-                          + " refund=" + refund + ToolUtil.Summary(derived, "worksProps") + ToolUtil.Summary(other, "otherSkipped")
+                          + " refund=" + refund + ToolUtil.Summary(upgradeEnded, "upgradeEnded") + ToolUtil.Summary(upgradeRefund, "upgradeRefund")
+                          + ToolUtil.Summary(derived, "worksProps") + ToolUtil.Summary(other, "otherSkipped")
                           + ToolUtil.Summary(outside, "outside");
             RRWLog.Info("tools: bulldoze intercepted: " + LastSummary);
+        }
+
+        // A picked road carries works: the click is always swallowed (vanilla would delete it mid-works).
+        private bool AnySite()
+        {
+            for (int i = 0; i < m_Roads.Count; i++) if (EntityManager.HasComponent<RoadWorksSite>(m_Roads[i])) return true;
+            return false;
         }
 
         private bool IsRrwArea(Entity area)

@@ -239,7 +239,7 @@ namespace RealisticRoadWorks.V3.DevCmds
             if (p.Kind == WorksKind.Construction && p.Mode == VisualMode.FullDig && p.Phase >= WorksPhase.Paving && p.Phase != WorksPhase.Complete)
                 sb.Append(" carHalf=").Append(p.CarHalfAllowed ? "yes" : "no(" + p.StageBlockReason + ")");
             if (p.MachinesStuck > 0) sb.Append(" STUCK=").Append(p.MachinesStuck);
-            if (p.Mode == VisualMode.HalfWidth) sb.Append(" modeH(as D)");
+            if (p.Mode == VisualMode.HalfWidth) sb.Append(UwDev.ListFlags(p));
             return sb.ToString();
         }
 
@@ -349,15 +349,22 @@ namespace RealisticRoadWorks.V3.DevCmds
             foreach (var p in SiteRegistry.Projects.Values)
             {
                 string n = "p" + p.Id;
+                // upgrade works (mode H) keep parking open by design (only the parking their applied window closes is checked) and
+                // let machines onto ready drop lanes inside open groups; their own lines are in UwCheck
+                bool upgrade = p.Mode == VisualMode.HalfWidth && p.Upgrade != null;
                 // a group in both OpenLanes and SoftZones (Director decision)
                 if ((p.OpenLanes & p.SoftZones) != RoadZones.None)
                     problems.Add(n + " group(s) " + R2Dev.Zones(p.OpenLanes & p.SoftZones) + " both open and soft (open∩soft)");
                 // WorkZonesReady must never contain an open or soft group
                 if ((p.WorkZonesReady & (p.OpenLanes | p.SoftZones)) != RoadZones.None)
                     problems.Add(n + " WorkZonesReady " + R2Dev.Zones(p.WorkZonesReady) + " contains open/soft group(s) " + R2Dev.Zones(p.WorkZonesReady & (p.OpenLanes | p.SoftZones)));
-                // design decision: no parking group opens during works
-                if (p.Phase != WorksPhase.Complete && (p.OpenLanes & RoadZones.Parking) != RoadZones.None)
-                    problems.Add(n + " parking group(s) " + R2Dev.Zones(p.OpenLanes & RoadZones.Parking) + " open during works");
+                // design decision: no parking group opens during works (FullDig, Minimal); upgrade works keep parking open by design
+                // and only the parking their applied window closes (Half, Carriageway) must stay closed
+                bool modeH = p.Mode == VisualMode.HalfWidth;
+                var parkingClosed = modeH ? PhasePlan.ParkingKeptClosed(p.View()) : RoadZones.Parking;
+                if (p.Phase != WorksPhase.Complete && (p.OpenLanes & parkingClosed) != RoadZones.None)
+                    problems.Add(n + " parking group(s) " + R2Dev.Zones(p.OpenLanes & parkingClosed) + " open during works"
+                                 + (modeH ? " (the upgrade window closes them)" : ""));
                 // trap rule: no car half stays decided open on a one-way road or dead end
                 if ((p.OpenLanes & RoadZones.Carriageway) != RoadZones.None && !p.CarHalfAllowed
                     && (p.StageBlockReason == StageBlockReason.OneWay || p.StageBlockReason == StageBlockReason.DeadEnd
@@ -368,6 +375,7 @@ namespace RealisticRoadWorks.V3.DevCmds
                 bool drainFresh = DrainFresh(p, now, out _);
                 if (!drainFresh && p.Phase != WorksPhase.Complete) staleProjects++;
                 RoadZones outside = p.MachineZones & RoadZones.AllLanes & ~p.WorkZonesReady;
+                if (upgrade) outside &= ~UwCheck.MachineAllowance(p);
                 if (p.MachinesReportFresh(now) && drainFresh && outside != RoadZones.None)
                     problems.Add(n + " machines in group(s) " + R2Dev.Zones(outside) + " outside WorkZonesReady " + R2Dev.Zones(p.WorkZonesReady)
                                  + " (switch=" + p.Switch + ", re-run once if a switch step just changed)");
@@ -383,7 +391,7 @@ namespace RealisticRoadWorks.V3.DevCmds
                         problems.Add(en + " reports drained group(s) that are applied open: " + R2Dev.Zones(er.ZonesDrained & er.OpenLanesApplied));
                     if ((er.SoftApplied & er.OpenLanesApplied) != RoadZones.None)
                         problems.Add(en + " lanes carry soft and open at once: " + R2Dev.Zones(er.SoftApplied & er.OpenLanesApplied));
-                    if (p.Phase != WorksPhase.Complete && !p.Releasing && (er.OpenLanesApplied & RoadZones.Parking) != RoadZones.None)
+                    if (!modeH && p.Phase != WorksPhase.Complete && !p.Releasing && (er.OpenLanesApplied & RoadZones.Parking) != RoadZones.None)
                         problems.Add(en + " parking applied open during works: " + R2Dev.Zones(er.OpenLanesApplied & RoadZones.Parking));
                     if (em.Exists(e) && em.HasComponent<RoadWorksRuntime>(e))
                     {
@@ -494,6 +502,12 @@ namespace RealisticRoadWorks.V3.DevCmds
             RRWGates.TempLineQueueRaise = RRWConst.kTempMarkingQueueRaise;
             RRWGates.TempLineLodBias = false;
             RRWGates.HalfCovers = true;
+            RRWGates.UpgradeDrop = RRWConst.kUwDropOn;
+            RRWGates.UpgradeVisualDrop = RRWConst.kUwVisualDropOn;
+            RRWGates.UpgradePreCover = RRWConst.kUwPreCoverOn;
+            RRWGates.UpgradeNewParkingOff = RRWConst.kUwNewParkingOffOn;
+            RRWGates.UpgradeFootprintHold = RRWConst.kUwFootprintHoldOn;
+            RRWGates.UpgradeOldAsphalt = RRWConst.kUwOldAsphaltOn;
         }
 
         private static bool Bool(string v, out bool b)
@@ -566,6 +580,9 @@ namespace RealisticRoadWorks.V3.DevCmds
                 case "linelod": if (!Bool(v, out b)) break; RRWGates.TempLineLodBias = b; what = "lineLod=" + b; return true;
                 case "halfcovers": if (!Bool(v, out b)) break; RRWGates.HalfCovers = b; what = "halfcovers=" + b; return true;
                 default:
+                    // the upgrade-works switches (uwdrop, uwvdrop, ...) belong to RRWGates itself
+                    if (RRWGates.TrySetUpgrade(n, v, out what, out error)) return true;
+                    if (error != null) return false;
                     error = "unknown switch (names: " + string.Join(" ", RRWGates.Names) + ")";
                     return false;
             }

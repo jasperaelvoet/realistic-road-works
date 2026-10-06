@@ -39,7 +39,8 @@ namespace RealisticRoadWorks.V3.Props
     //  - a change of a chain-end node's non-works edges (a road was connected) respawns that end's barrier group
     //    and the crew props (new first, same frame) with the junction layout; Overridden props that stand inside a non-works
     //    road are deleted (their slot is skipped while the road is there) instead of being made visible again;
-    //  - site / kerb fences, WorksHalf barrier lines, centre cones (+ approach signals behind a setting and switch).
+    //  - site / kerb fences, WorksHalf barrier lines, centre cones (+ approach signals behind a setting and switch);
+    //  - upgrade works (mode H): band devices and band heaps from the bands' sub-strips (PropUpgrade.cs).
     [RegisterSystem(SystemUpdatePhase.Modification1, Before = typeof(Game.Tools.GenerateAreasSystem), Order = RRWOrder.Props)]
     public partial class PropSystem : GameSystemBase
     {
@@ -161,6 +162,7 @@ namespace RealisticRoadWorks.V3.Props
             m_PrefabsResolved = false;
             m_PrefabInfo.Clear();
             m_FenceCache.Clear();
+            m_BandCache.Clear();
             m_Guard.Reset();
             DustVfx.Reset();   // VFXSystem rebuilds its table for every load: re-verify the dust clone
             DevPreload();
@@ -277,6 +279,7 @@ namespace RealisticRoadWorks.V3.Props
                 int n = TearDown(pp);
                 PropState.Projects.Remove(m_RemoveProjects[i]);
                 m_FenceCache.Remove(m_RemoveProjects[i]);
+                m_BandCache.Remove(m_RemoveProjects[i]);
                 if (n > 0) RRWLog.Verbose("props: project #" + pp.Id + " torn down (" + n + " props)");
             }
             PxPerf.End(PxT.Teardown);
@@ -723,9 +726,11 @@ namespace RealisticRoadWorks.V3.Props
             // budget: thinning per project (sticky per layout). Kerb fences, closed-end lines and signs count at
             // every level (never thinned per site); heaps -> edge cones -> divider cones thin first.
             int fixedCount = PropLayout.FixedEstimate(view, plan0, m_FenceFallback ? m_SafetyPitch : m_KerbFencePitch, pp.Access.Count)
-                             + PropLayout.FenceEstimate(view, plan0, m_SiteFencePitch);
+                             + PropLayout.FenceEstimate(view, plan0, m_SiteFencePitch)
+                             + PropLayout.UpgradeFixedEstimate(view, plan0, m_FenceFallback ? m_SafetyPitch : m_KerbFencePitch);
             uint layout = Mix(Mix(Mix((uint)view.Kind, (uint)view.Mode), (uint)p.Revision), Mix(Bits(math.round(view.TrimmedLength * 2f)), view.Cancelled ? 1u : 0u));
             layout = Mix(layout, Mix((uint)fixedCount, (uint)plan0.Divider));
+            if (plan0.Upgrade) layout = Mix(layout, (uint)plan0.Devices | ((uint)plan0.BandMask << 16) | ((uint)plan0.WaitingMask << 24));
             if (pp.Thin < 0 || pp.ThinLayout != layout)
             {
                 pp.Thin = PropLayout.ThinLevel(view, plan0, fixedCount, out pp.Estimate);
@@ -770,14 +775,17 @@ namespace RealisticRoadWorks.V3.Props
             // front steps, phase-fraction steps, divider pick-up bucket) only re-evaluate the slot groups (re-applying the slots
             // whose fill changed), the crew depots and the divider: the same entities, the same frame, a fraction of the work.
             uint key = ProcessKey(p, view, pp, plan0, limited);
+            pp.DiffKey = key;
             uint fkey = Mix(PropCrewLayout.FrontStep(view), (uint)math.floor(view.F * 500f));   // 0.25 m crew-front steps, f windows
+            if (view.IsUpgrade) fkey = Mix(fkey, UpgradeFrontKey(view));                        // band fronts (band heaps)
             uint dkey = PropCrewLayout.DividerPickKey(view);
             // Self-heal = alive check of 1/kSelfHealInterval of the slots per update (each slot every
             // kSelfHealInterval updates) instead of a full diff of the whole project every kSelfHealInterval updates.
             PxPerf.Begin(PxT.HealScan);
             if (HealScan(pp)) pp.HealPending = true;
             PxPerf.End(PxT.HealScan);
-            bool urgent = key != pp.LastKey || stampsChanged || pp.OwnersDirty || pp.RespawnAll || topo || !pp.FillCacheValid;
+            bool urgent = key != pp.LastKey || stampsChanged || pp.OwnersDirty || pp.RespawnAll || topo || !pp.FillCacheValid
+                          || (view.IsUpgrade && !pp.BandFillValid);
             bool full = urgent || pp.HealPending;
             if (full && !urgent && m_FullDiffsThisUpdate >= kHealDiffsPerUpdate && pp.HealDeferStreak < kHealMaxDefer)
             {
@@ -848,7 +856,7 @@ namespace RealisticRoadWorks.V3.Props
         internal static string DepotList(in ProjectView v)
         {
             int n = v.CrewCount;
-            if (n <= 1) return "-";
+            if (n <= 1 || v.IsUpgrade) return "-";
             var sb = new System.Text.StringBuilder();
             for (int i = 1; i < n; i++)
             {
@@ -930,6 +938,12 @@ namespace RealisticRoadWorks.V3.Props
             h = Mix(h, (uint)v.OpenLanes | (pp.FencesFit ? 0x10000u : 0u));    // staged opening / fence swaps in the same frame
             h = Mix(h, pp.BuildingsKey);
             h = Mix(h, r3);
+            if (v.IsUpgrade)
+            {
+                // upgrade works: closed / ready groups, blocker reports and sub-strips decide where band devices may stand
+                pp.UpgradeKey = UpgradeKeyOf(p, v, plan, pp);
+                h = Mix(h, pp.UpgradeKey);
+            }
             return h == 0 ? 1u : h;
         }
 
@@ -946,6 +960,7 @@ namespace RealisticRoadWorks.V3.Props
                 pp.Chain.Add(new ChainEdge { Edge = e, Record = r, U0 = site.m_ChainU0, U1 = site.m_ChainU1 });
             }
             pp.Chain.Sort((a, b) => a.Lo.CompareTo(b.Lo));
+            for (int i = 0; i < pp.Chain.Count; i++) pp.Chain[i].Index = i;
             pp.ForeignDirty = true;
             pp.ChainRevision = p.Revision;
             pp.RegistryRevision = SiteRegistry.Revision;
@@ -1018,6 +1033,7 @@ namespace RealisticRoadWorks.V3.Props
 
             // fixed slot groups (+ crew depots). PropGroup.Divider / Signs are NOT slot groups (laid out below);
             // PropKind 7/8 stay the barrier lines, so the loop stops at PropGroup.Divider explicitly.
+            pp.CrewOnBand = -1;
             SlotGroups(p, pp, view, plan, limited, A, true);
             CrewDepots(p, pp, view, plan, limited, A, true);
             pp.FillCacheValid = true;
@@ -1038,6 +1054,13 @@ namespace RealisticRoadWorks.V3.Props
             if (signsOn || headOn) SignsAndHead(p, pp, view, plan, signsOn, headOn);
             else pp.Signs = 0;
             DeviceSummary(p, pp, plan, works);
+            // upgrade works: band devices (cached layout) and band heaps
+            if (view.IsUpgrade)
+            {
+                UpgradeBands(p, pp, view, plan, limited);
+                UpgradeHeaps(p, pp, view, limited, true);
+                UpgradeSummary(p, pp, view, plan);
+            }
 
             // delete what no slot wants any more
             m_RemoveKeys.Clear();
@@ -1143,14 +1166,14 @@ namespace RealisticRoadWorks.V3.Props
                     if (full)
                     {
                         pp.DepotCache[ci] = fill;
-                        if (fill >= 1) WantCrewSet(p, pp, PropKind.CrewDepot, id * 2, k, PropCrewLayout.DepotU(view, i, k), fill, A);
+                        if (fill >= 1) WantCrewSet(p, pp, view, PropKind.CrewDepot, id * 2, k, PropCrewLayout.DepotU(view, i, k), fill, A);
                         continue;
                     }
                     if (pp.DepotCache[ci] == fill) continue;
                     pp.DepotCache[ci] = fill;
                     pp.FrontApplied++;
                     if (fill < 1) RemoveGroupSlot(pp, PropKind.CrewDepot, k, id * 2);
-                    else WantCrewSet(p, pp, PropKind.CrewDepot, id * 2, k, PropCrewLayout.DepotU(view, i, k), fill, A);
+                    else WantCrewSet(p, pp, view, PropKind.CrewDepot, id * 2, k, PropCrewLayout.DepotU(view, i, k), fill, A);
                 }
                 if (full && any) pp.Depots++;
             }
@@ -1166,10 +1189,12 @@ namespace RealisticRoadWorks.V3.Props
                 var c = pp.FillCache[gi];
                 if (c == null || c.Length != PhasePlan.SlotCount((PropGroup)gi, view)) return false;
             }
+            if (view.IsUpgrade && !BandHeapCacheFits(pp, view)) return false;
             pp.Pass++;
             bool A = view.Mode == VisualMode.FullDig;
             SlotGroups(p, pp, view, plan, limited, A, false);
             CrewDepots(p, pp, view, plan, limited, A, false);
+            if (view.IsUpgrade) UpgradeHeaps(p, pp, view, limited, false);
             if (divider)
             {
                 // divider cones picked up behind the crew truck (C4 f .92-.96): re-lay the divider, drop the cones not wanted
@@ -1285,7 +1310,7 @@ namespace RealisticRoadWorks.V3.Props
                     Apply(p, pp, w);
                     return;
                 case PropKind.Crew:
-                    WantCrewSet(p, pp, kind, 0, k, u, fill, A);
+                    WantCrewSet(p, pp, v, kind, 0, k, u, fill, A);
                     return;
             }
         }
@@ -1294,8 +1319,34 @@ namespace RealisticRoadWorks.V3.Props
         // mode A on the left verge behind the parked crew truck (ground); mode D on the right sidewalk. The truck-load props are
         // ~2 x 3.7 m: their long side goes ACROSS the road so the 2.5 m slots line up side by side (along the road they would
         // interpenetrate). Slots 0 and 2 get a tall cone 1.5 m beyond them, 1 m closer to the road.
-        private void WantCrewSet(ProjectRecord p, ProjectProps pp, PropKind kind, int subBase, int k, float u, int fill, bool A)
+        // Upgrade works: on a free strip of the lead band when one is wide enough (in a row along the road), else as mode D.
+        private void WantCrewSet(ProjectRecord p, ProjectProps pp, in ProjectView v, PropKind kind, int subBase, int k, float u, int fill, bool A)
         {
+            if (v.IsUpgrade && kind == PropKind.Crew)
+            {
+                if (UpgradeCrewSpot(p, pp, v, k, out float ub, out float lb, out YMode yb))
+                {
+                    pp.CrewOnBand = 1;
+                    var wb = new Want
+                    {
+                        Key = PropKeys.Make(kind, subBase, k), Kind = kind, U = ub, Lateral = lb, LatChain = true, Y = yb,
+                        Rot = RotMode.Tangent, JitterDeg = 3f, Fill = fill, Group = DerivedGroup.PropStatic,
+                        Prefab = m_Crew.Length > 0 ? m_Crew[k % m_Crew.Length] : Entity.Null,
+                    };
+                    Apply(p, pp, wb);
+                    if (k == 0 || k == 2)
+                    {
+                        var cb = wb;
+                        cb.Key = PropKeys.Make(kind, subBase + 1, k);
+                        cb.U = ub + (k == 0 ? -2.5f : 2.5f);
+                        cb.Rot = RotMode.Random;
+                        cb.Prefab = m_TallCone;
+                        Apply(p, pp, cb);
+                    }
+                    return;
+                }
+                pp.CrewOnBand = 0;
+            }
             var ce = PropLayout.Locate(pp.Chain, u, out float _, out float gap);
             if (ce == null || gap > PropLayout.kCoverTolerance) return;   // slot lies on no project edge (split-off part)
             float hw = ce.Record.Section.HalfWidth;
@@ -2103,6 +2154,7 @@ namespace RealisticRoadWorks.V3.Props
                       " skippedForeign=" + pp.SkippedForeign + " skippedOutside=" + pp.SkippedOutside + " released=" + pp.Released +
                       " trims=[" + RRWLog.F(pp.Trim0) + "," + RRWLog.F(pp.Trim1) + "]");
             sb.Append(" | r3: " + pp.DeviceLine + " fencesFit=" + pp.FencesFit + " signalWrites=" + pp.SignalWrites + " signalAsserts=" + pp.SignalAsserts);
+            if (pp.UpgradeLine.Length > 0) sb.Append(" | uw: " + pp.UpgradeLine);
             if (SiteRegistry.TryGetProject(pp.Id, out var pr))
                 sb.Append(" | r4: crews=" + pr.Crews + " depots=" + pp.Depots + " [" + DepotList(pr.View()) + "] fullDiffs=" + pp.FullDiffs + " frontDiffs=" + pp.FrontDiffs +
                           " healMissing=" + pp.HealMissing);
@@ -2140,6 +2192,7 @@ namespace RealisticRoadWorks.V3.Props
                 int yBad = 0, yChecked = 0, outside = 0, foreign = 0, alive = 0;
                 int r3Fence = 0, r3NotReady = 0, r3OnOpen = 0, r3Checked = 0;
                 int depotStray = 0, depots = 0;
+                int uwInLane = 0, uwHeaps = 0, uwFences = 0, uwChecked = 0;
                 ProjectView pv = p != null ? p.View() : default;
                 float pvKeep = p != null ? PhasePlan.Props(pv).StartBarrierKeep : 0f;
                 float worst = 0f;
@@ -2186,6 +2239,7 @@ namespace RealisticRoadWorks.V3.Props
                     if (sl.Heap && em.HasComponent<RRWHeapFill>(sl.Entity) && em.GetComponentData<RRWHeapFill>(sl.Entity).m_Fullness != sl.Fullness)
                         problems.Add(where + " RRWHeapFill " + em.GetComponentData<RRWHeapFill>(sl.Entity).m_Fullness + " != fill " + sl.Fullness);
                     if (p != null) CheckDevice(em, pp, p, sl, problems, ref r3Fence, ref r3NotReady, ref r3OnOpen, ref r3Checked);
+                    if (p != null && pv.IsUpgrade && !released) CheckUpgradeSlot(em, pp, p, pv, sl, problems, ref uwInLane, ref uwHeaps, ref uwFences, ref uwChecked);
                     // a crew depot stands only at a boundary of the CURRENT crew layout, inside that crew's section,
                     // before the teardown
                     if (p != null && PropKeys.Kind(sl.Key) == PropKind.CrewDepot && !released)
@@ -2223,6 +2277,9 @@ namespace RealisticRoadWorks.V3.Props
                 if (r3Fence > 3) problems.Add("props #" + pp.Id + " " + r3Fence + " kerb fence panels on sides without an open sidewalk in total");
                 if (r3NotReady > 3) problems.Add("props #" + pp.Id + " " + r3NotReady + " in-lane devices on a works half that is not ready in total");
                 if (r3OnOpen > 3) problems.Add("props #" + pp.Id + " " + r3OnOpen + " signs / amber heads on an open lane or sidewalk in total");
+                if (uwInLane > 3) problems.Add("props #" + pp.Id + " " + uwInLane + " band devices on strips that carry traffic in total");
+                if (uwHeaps > 3) problems.Add("props #" + pp.Id + " " + uwHeaps + " band heaps on sidewalks, lanes with traffic or keep-outs in total");
+                if (uwFences > 3) problems.Add("props #" + pp.Id + " " + uwFences + " band fence panels on open lanes in total");
                 detail?.Add("props #" + pp.Id + " slots=" + pp.Slots.Count + " camChain=" + RRWLog.F(pp.CamDist) + " yChecked=" + yChecked + " yBad=" + yBad + " worstErr=" + RRWLog.F(worst) +
                             " thin=" + pp.Thin + " far=" + pp.Far + " owners=" + pp.OwnerNodes.Count +
                             " outsideFootprint=" + outside + " insideNonWorksRoad=" + foreign + " releasedAlive=" + (released ? alive : 0) +
@@ -2232,7 +2289,8 @@ namespace RealisticRoadWorks.V3.Props
                             " | r4: crews=" + (p != null ? pv.CrewCount.ToString() : "-") + " depotProps=" + depots + " depotStray=" + depotStray +
                             " fullDiffs=" + pp.FullDiffs + " frontDiffs=" + pp.FrontDiffs + " frontApplied=" + pp.FrontApplied +
                             " healScanned=" + pp.HealScanned + " healMissing=" + pp.HealMissing + " healDeferred=" + pp.HealDeferred +
-                            " slotList=" + pp.SlotList.Count + (pp.SlotList.Count != pp.Slots.Count ? " SLOTLIST MISMATCH" : ""));
+                            " slotList=" + pp.SlotList.Count + (pp.SlotList.Count != pp.Slots.Count ? " SLOTLIST MISMATCH" : "") +
+                            (p != null && pv.IsUpgrade ? " | uw: checked=" + uwChecked + " deviceOnTraffic=" + uwInLane + " heapBad=" + uwHeaps + " fenceOnOpenLane=" + uwFences + " | " + pp.UpgradeLine : ""));
                 if (pp.SlotList.Count != pp.Slots.Count) problems.Add("props #" + pp.Id + " slot list " + pp.SlotList.Count + " != slots " + pp.Slots.Count);
             }
         }

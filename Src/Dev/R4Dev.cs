@@ -102,12 +102,17 @@ namespace RealisticRoadWorks.V3.DevCmds
                 string n = "p" + p.Id + " (crews)";
                 if (p.Crews < 1 || p.Crews > RRWConst.kMaxCrewsPerProject)
                     problems.Add(n + " Crews=" + p.Crews + " outside [1, " + RRWConst.kMaxCrewsPerProject + "] (Director latch)");
-                int crews = p.View().CrewCount;
+                var view = p.View();
+                int crews = view.CrewCount;
+                bool upgrade = view.IsUpgrade;   // mode H: one crew per band of the window, not chain sections
                 if (p.FocusCrew < 0 || p.FocusCrew >= crews)
                     problems.Add(n + " FocusCrew=" + p.FocusCrew + " outside [0, " + (crews - 1) + "] (Director)");
-                if (crews > 1 && p.Mode != VisualMode.FullDig)
+                if (crews > 1 && p.Mode != VisualMode.FullDig && !upgrade)
                     problems.Add(n + " mode " + p.Mode + " with " + crews + " crews (only mode A splits into sections)");
-                if (crews > 1)
+                if (upgrade && crews > math.max(1, view.Upgrade.BandsIn(view.Upgrade.LayoutWindow)))
+                    problems.Add(n + " mode H with " + crews + " crews but " + view.Upgrade.BandsIn(view.Upgrade.LayoutWindow) + " bands in window "
+                                 + view.Upgrade.LayoutWindow + " (one crew per band)");
+                if (crews > 1 && !upgrade)
                 {
                     float trimmed = (p.TrimU1 > 0f ? p.TrimU1 : p.ChainLength) - p.TrimU0;
                     float sec = (trimmed > 0f ? trimmed : p.ChainLength) / crews;
@@ -115,7 +120,7 @@ namespace RealisticRoadWorks.V3.DevCmds
                         problems.Add(n + " sections of " + DevSites.F1(sec) + " m < kMinSectionLength " + RRWConst.kMinSectionLength
                                      + " (" + crews + " crews on " + DevSites.F1(trimmed) + " m; the Director latch and SetCrews never allow this)");
                 }
-                if (p.Mode == VisualMode.FullDig && p.Phase != WorksPhase.Complete && p.Phase != WorksPhase.None && !p.Releasing && !(p.WorkSeconds > 0f))
+                if (PhasePlan.HasMachines(p.Mode) && p.Phase != WorksPhase.Complete && p.Phase != WorksPhase.None && !p.Releasing && !(p.WorkSeconds > 0f))
                     problems.Add(n + " WorkSeconds=" + DevSites.F(p.WorkSeconds) + " (Director must write it every update; without it the return-aware anchors are off)");
                 // RoadWorksRuntime.m_Crews on every edge = the project's latch (0 = one crew)
                 for (int i = 0; i < p.Edges.Count; i++)

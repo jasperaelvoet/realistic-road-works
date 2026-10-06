@@ -54,6 +54,11 @@ namespace RealisticRoadWorks.V3.Director
                 if (proj.Kind != WorksKind.Construction || proj.Edges.Count == 0) continue;
                 var ps = proj.GetOrCreate<DirProjectState>(ModuleSlot.Director);
                 float U = proj.ChainLength;
+                if (IsUpgradeProject(proj))
+                {
+                    UpgradeClearing(proj, ps, U);
+                    continue;
+                }
                 if (!ps.ClearInit)
                 {
                     ps.ClearInit = true;
@@ -164,6 +169,29 @@ namespace RealisticRoadWorks.V3.Director
                             + " owned trees kept, footprint +-" + RRWLog.F(TreeClearing.MaxFootprint(proj)) + " m, strip +-" + RRWLog.F(TreeClearing.MaxStrip(proj)) + " m");
         }
 
+        // Upgrade works (the road stays visible, no topsoil strip): one sweep when a new project is adopted, only on the sides where
+        // a build band reaches the new road edge (the new strip's terrain part). Trunks within HalfWidth + kClearCanopyAllowance and
+        // canopies hanging over that side go; the other side and loaded projects are left alone (the road was already there).
+        private void UpgradeClearing(ProjectRecord proj, DirProjectState ps, float U)
+        {
+            if (ps.ClearInit) return;
+            ps.ClearInit = true;
+            ps.ClearSkipped = true;   // no progressive clearing, no reveal sweep, no completion count
+            ps.FinalSweepDone = true;
+            ps.ClearedU = U;
+            ps.TreeSnapshot = null;
+            if (!ps.UwFresh || U <= 0.01f)
+            {
+                RRWLog.Verbose("director: upgrade project #" + proj.Id + " tree clearing skipped (" + (ps.UwFresh ? "no chain" : "loaded") + ")");
+                return;
+            }
+            var st = default(TreeScanStats);
+            TreeClearing.Scan(EntityManager, m_ObjectSearch, proj, 0f, U, true, ref st, null, null, null, true);
+            AddCleared(ps, st, false);
+            RRWLog.Info("director: upgrade project #" + proj.Id + " tree clearing on the build sides: " + st.Deleted + " removed (" + st.Overhang
+                        + " overhanging), " + st.OwnedKept + " owned trees kept, " + st.Candidates + " candidates");
+        }
+
         // countOwned: only the progressive sweeps (disjoint spans) count owned trees; full re-scans would double them
         private static void AddCleared(DirProjectState ps, in TreeScanStats s, bool countOwned = true)
         {
@@ -235,6 +263,23 @@ namespace RealisticRoadWorks.V3.Director
 
         private static readonly HashSet<Entity> s_Seen = new HashSet<Entity>();
 
+        // Edge-frame sides where an upgrade build / rebuild band reaches the new road edge (within 0.5 m of the outline).
+        private static bool BuildSides(EdgeRecord rec, out bool left, out bool right)
+        {
+            left = right = false;
+            var eu = rec.Upgrade;
+            if (eu == null) return false;
+            float edge = math.max(0f, rec.Section.HalfWidth - 0.5f);
+            for (int i = 0; i < eu.BandCount; i++)
+            {
+                var b = eu.Bands[i];
+                if (b.Kind != BandKind.Build && b.Kind != BandKind.Rebuild) continue;
+                if (b.Hi >= edge) right = true;
+                if (b.Lo <= -edge) left = true;
+            }
+            return left || right;
+        }
+
         // Trunk footprint half width of an edge (from the centre line).
         public static float Footprint(in EdgeSection sec, VisualMode mode) =>
             sec.HalfWidth + (mode == VisualMode.FullDig ? RRWConst.kTopsoilMargin : 0f) + DirConst.kClearCanopyAllowance;
@@ -301,8 +346,10 @@ namespace RealisticRoadWorks.V3.Director
         // Scans [u0, u1] of the project chain. delete: mark matching free-standing trees Deleted; else count them
         // (stats.Found) and optionally report them (hits). collect: receives every matching free-standing tree.
         // onlyListed (delete mode): only trees in this set are deleted; other matches are kept and counted (stats.LateKept).
+        // buildSides (upgrade works): only edges with an upgrade build band that reaches the road edge, and only trees on that side.
         public static void Scan(EntityManager em, Game.Objects.SearchSystem search, ProjectRecord proj, float u0, float u1, bool delete,
-                                ref TreeScanStats stats, List<TreeHit> hits, HashSet<Entity> collect = null, HashSet<Entity> onlyListed = null)
+                                ref TreeScanStats stats, List<TreeHit> hits, HashSet<Entity> collect = null, HashSet<Entity> onlyListed = null,
+                                bool buildSides = false)
         {
             if (search == null || proj == null || u1 < u0) return;
             NativeQuadTree<Entity, QuadTreeBoundsXZ> tree = default;
@@ -319,6 +366,8 @@ namespace RealisticRoadWorks.V3.Director
                     if (u1 < lo || u0 > hi) continue;
                     var arc = rec.Arc;
                     float len = arc.Length;
+                    bool sideL = true, sideR = true;
+                    if (buildSides && !BuildSides(rec, out sideL, out sideR)) continue;
                     float sa = PhasePlan.EdgeS(math.max(u0, lo), site.m_ChainU0, site.m_ChainU1, len);
                     float sb = PhasePlan.EdgeS(math.min(u1, hi), site.m_ChainU0, site.m_ChainU1, len);
                     // edge-local window (EdgeS clamps to [0, len]; trees around a node project onto the end and are
@@ -365,7 +414,13 @@ namespace RealisticRoadWorks.V3.Director
                             float3 pos = em.GetComponentData<Game.Objects.Transform>(t).m_Position;
                             float st = arc.Project(pos);
                             if (st < s0 - 0.5f || st > s1 + 0.5f) continue;
-                            float d = math.distance(arc.Position(st).xz, pos.xz);
+                            float3 cp = arc.Position(st);
+                            float d = math.distance(cp.xz, pos.xz);
+                            if (buildSides)
+                            {
+                                bool right = math.dot((pos - cp).xz, arc.Right(st).xz) >= 0f;
+                                if (right ? !sideR : !sideL) continue;
+                            }
                             bool inFoot = d <= foot;
                             if (!inFoot && d > strip + DirConst.kClearCanopyMax) continue;   // cannot reach the strip with any canopy
                             float canopy = inFoot ? math.min(col.m_Canopy[k], DirConst.kClearCanopyMax) : CanopyRadius(em, t, col.m_Canopy[k]);

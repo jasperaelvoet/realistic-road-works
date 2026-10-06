@@ -443,6 +443,10 @@ namespace RealisticRoadWorks.V3.Ground
             var site = em.GetComponentData<RoadWorksSite>(edge);
             st.Rebuild = rt.Has(RuntimeFlags.NeedsRebuild);
             st.HideWantedRaw = rt.HideWanted && site.Mode == VisualMode.FullDig;
+            // Upgrade works (mode H) keep the road visible on vanilla terrain (PhasePlan.Terrain is Vanilla for every mode but A). The
+            // old-footprint hold after a narrowing is not part of this build: with its switch on the terrain still stays vanilla.
+            if (site.Mode == VisualMode.HalfWidth && RRWGates.UpgradeFootprintHold)
+                RRWLog.Once("ground-uw-footprint-hold", "ground: footprint hold requested for upgrade works; this build keeps their terrain vanilla");
             st.SiteKind = site.Kind;
             st.Phase = rt.m_Phase;
             st.HideFrameFlag = rt.Has(RuntimeFlags.HideFrame);
@@ -1108,6 +1112,20 @@ namespace RealisticRoadWorks.V3.Ground
             return sb.ToString();
         }
 
+        // Mode H (upgrade works): never hidden, no trench. A reveal hold of works that ended on the same edge just before may still
+        // run (the ground state outlives the site); a clone stage that stays Cloned under a mode H road is a fault.
+        private void CheckUpgradeEdge(Entity edge, in RoadWorksRuntime rt, uint now, List<string> problems)
+        {
+            if (rt.HideWanted || rt.Hidden)
+                problems.Add("ground: mode H edge " + RRWLog.E(edge) + (rt.Hidden ? " is hidden" : " wants to be hidden") + " (upgrade works keep the road visible)");
+            if (!GroundTable.Edges.TryGetValue(edge, out var st)) return;
+            if (st.Wanted || st.HideWantedRaw || (st.TargetUpdate == now && st.Target.Kind != TerrainProfileKind.Vanilla))
+                problems.Add("ground: mode H edge " + RRWLog.E(edge) + " has a terrain target " + st.Target.Kind + " (expected vanilla)");
+            if (st.Stage == GroundStage.Cloned && unchecked(now - st.StepUpdate) > (uint)(3 * RRWConst.kTerrainTriggerMinUpdates + 5))
+                problems.Add("ground: mode H edge " + RRWLog.E(edge) + " still holds composition clones (stage Cloned for "
+                             + unchecked(now - st.StepUpdate) + " updates; expected the reveal hold)");
+        }
+
         private void Check(EntityManager em, List<string> problems)
         {
             uint now = RRWClock.UpdateIndex;
@@ -1117,6 +1135,7 @@ namespace RealisticRoadWorks.V3.Ground
                 if (!EcsUtil.Alive(em, edge) || !em.HasComponent<RoadWorksRuntime>(edge) || !em.HasComponent<RoadWorksSite>(edge)) continue;
                 var rt = em.GetComponentData<RoadWorksRuntime>(edge);
                 var site = em.GetComponentData<RoadWorksSite>(edge);
+                if (site.Mode == VisualMode.HalfWidth) { CheckUpgradeEdge(edge, rt, now, problems); continue; }
                 if (!rt.HideWanted || site.Mode != VisualMode.FullDig) continue;
                 if (!GroundTable.Edges.TryGetValue(edge, out var st)) { problems.Add("ground: HideWanted edge " + RRWLog.E(edge) + " has no ground state"); continue; }
                 if (st.Ineligible || st.Faulted) { problems.Add("ground: HideWanted edge " + RRWLog.E(edge) + " is " + (st.Faulted ? "faulted" : "ineligible") + " (no trench)"); continue; }

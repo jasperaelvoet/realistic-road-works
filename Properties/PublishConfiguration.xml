@@ -54,17 +54,15 @@ Source code and issue tracker: https://github.com/jasperaelvoet/realistic-road-w
 	<!--Link to the forum post where the mod can be discussed-->
 	<ForumLink Value="" />
 	<!--Version of the mod-->
-	<ModVersion Value="3.0.0" />
+	<ModVersion Value="3.1.0" />
 	<!--Recommended version of the base game to use the mod-->
 	<GameVersion Value="1.6.*" />
 	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
 	<ChangeLog>
-First public release.
-- Roads take time to build and demolish, with five construction phases and three demolition phases.
-- Real terrain trench, ground textures, excavators with an IK dig cycle, dump trucks, rollers, a paver and a line painter.
-- Multiple crews on long roads, realistic machine speeds.
-- Closures with rerouting, staged opening with yellow temporary lines, fences, signs and beacons.
-- Road works info panel, tooltips and settings.
+3.1.0: road upgrades build only what changes. Widening digs and paves only the new strip, narrowing breaks out only the removed
+strip, lane changes are re-marked one direction at a time. Traffic keeps running in both directions beside the works on yellow
+temporary markings; machines stay inside the closed strip. Streets with houses keep all lanes and driveways open. New setting
+"Road upgrades" (Realistic / Full rebuild / Instant). Saves stay compatible with 3.0.0.
 	</ChangeLog>
 	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
 	<ExternalLink Type="github" Url="https://github.com/jasperaelvoet/realistic-road-works" />

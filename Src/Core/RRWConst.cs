@@ -282,7 +282,7 @@ namespace RealisticRoadWorks.V3
         // inside the building lots and cut through facades with no front setback.
         public const float kFootprintFenceOffset = -0.4f;
         public const float kCentreConeSpacing = 6f;      // was 8. Divider cones (DividerStyle.Cones) at DirSplitC + kDividerInset into the works half
-        public const float kTempMarkingWidth = 0.15f;    // yellow temporary line width (m) (dev selector RRWGates.TempLineWidth)
+        public const float kTempMarkingWidth = 0.25f;    // yellow temporary line width (m) (dev selector RRWGates.TempLineWidth)
         public const float kTempMarkingEdgeInset = 0.3f; // legacy EdgeSection.TempLine(i, reversed) only; the band-kind form uses kTempLineEdgeInset
         public static readonly float3 kTempMarkingTint = new float3(1.0f, 0.80f, 0.08f); // works yellow (BE/NL/DE temporary markings)
 
@@ -328,7 +328,7 @@ namespace RealisticRoadWorks.V3
         public const bool kSignalYawFlip = false;        // experimental: amber head turned 180 deg when true -> RRWGates.SignalYawFlip
         public const bool kSignsOn = true;               // experimental -> RRWGates.Signs (looks only: default on)
         public const int kKerbFenceVariant = 0;          // experimental -> RRWGates.KerbFenceVariant (index into PrefabNames.KerbFenceVariants; 0 = Low02/LowShort02, -1 = barrier line)
-        public const int kTempLineSource = 0;            // experimental -> RRWGates.TempLineSource (0 = Y1 Concrete, 1 = Y2 Sand, 2 = Y3 Pavement)
+        public const int kTempLineSource = 1;            // experimental -> RRWGates.TempLineSource (0 = Y1 Concrete, 1 = Y2 Sand, 2 = Y3 Pavement)
         public const bool kAmberHeadOn = false;          // experimental -> RRWGates.AmberHead (off until verified in game: TrafficLightObject collision + state unverified)
         public const float kTempMarkingRoundness = 0.01f;// RenderedArea roundness of "RRW Temp Marking" (was the 0.5 default: lines ~0.53 m wide)
         public const int kTempMarkingQueueRaise = 200;   // TempMarking queue 2000 + this = 2200 (HDRP decal range <= 2500)
@@ -350,6 +350,63 @@ namespace RealisticRoadWorks.V3
         public const float kBandRosterW1 = 3.2f, kBandRosterW2 = 6.6f;
         public const float kMiniExcavatorScale = 0.25f;
         public const float kBlackoutExtraWidth = 0.30f, kCentreBlackoutWidth = 0.45f;
+
+        // ---- upgrade works (mode H: partial works when a road is replaced by another type)
+        public const float kUwTol = 0.4f;                // re-marking runs narrower than this are measurement noise (lane widths +-0.2 m)
+        public const float kUwLaneTol = 0.3f;            // a lane line that moved less than this is the same line
+        public const float kUwShiftTol = 0.3f;           // new curve = old curve shifted sideways: every sample within this of the mean shift
+        public const float kUwCalibMaxResidual = 0.3f;   // composition calibration error above this: layout unreadable (full rebuild)
+        public const float kUwBandMinWidth = 1.0f;       // build / rebuild / remove runs narrower than this become re-marking (or nothing)
+        public const int kUwMaxBands = 4;                // per edge (saved slots)
+        public const int kUwMaxWindows = 8;              // per project (saved slots)
+        public const int kUwMaxChainBands = 8;           // chain bands of one project (more: the chain is split)
+        public const float kUwSetupP = 0.03f;            // setup share of p, fixed at creation (0 when created rushed)
+        public const float kUwTeardownP = 0.03f;         // teardown share at the end of p
+        public const float kUwKindBuild = 0.92f;         // duration weight per metre of band width, relative to a full rebuild
+        public const float kUwKindBuildRemark = 0.78f;   // build band followed by a re-marking window (no finishing of its own)
+        public const float kUwKindRebuild = 0.80f;
+        public const float kUwKindRemove = 0.65f;        // times the demolition / construction hours ratio
+        public const float kUwKindRemark = 0.14f;
+        public const float kUwStagedOverhead = 0.15f;    // extra time when traffic keeps running beside the works
+        public const float kUwSwitchHours = 0.25f;       // per window switch
+        public const float kUwMinHours = 2.0f, kUwMinHoursRemark = 1.0f;
+        public const float kUwBandMachineClear = 0.25f;  // machines keep this far from an open lane edge
+        public const float kUwFenceClear = 0.30f;        // ... and this far from a fence side
+        public const float kUwDropInset = 0.2f;          // a car lane is dropped when its centre lies inside [Lo + inset, Hi - inset] of a band
+        public const float kUwProvisionalReach = 0.5f;  // a direction keeps a lane in the works bands when it reaches this far onto the old road
+        public const float kUwBlockerNodeSetback = 30f;  // lane blockers and bands stop this far before each node
+        public const float kUwDrivewayKeepOut = 3f;      // +- along the road around a building access: no standing machine
+        public const float kUwSlewLimitDeg = 15f;        // excavator slew next to traffic (front dump only)
+        public const int kUwTooltipMaxEdges = 64;
+        // classifier details
+        public const float kUwMergeGap = 0.5f;           // runs / entries of the same kind closer than this merge
+        public const float kUwBoundaryTol = 0.15f;       // half width of the re-marking strip around a lane line that appears / disappears
+        public const float kUwStripGap = 0.25f;          // gaps between same-kind same-direction strips smaller than this are closed
+        public const float kUwMiddleTol = 0.25f;         // a run within the median zone +- this is a Middle band
+        public const float kUwEndTol = 1.0f;             // new curve end points may lie this far along the old arc from the old ends
+        public const float kUwLengthTol = 0.02f;         // relative length change allowed beyond the offset-curve length
+        public const float kUwUnionGap = 0.5f;           // edge bands of one chain cluster into one chain band within this
+        public const float kUwMinWindowWeight = 0.05f;   // smallest window weight (m x factor) so a window never has zero length
+        // crews of upgrade works (machine-safe width of a band decides the roster)
+        public const float kUwExcavatorMinWidth = 6.6f;  // full excavator with a truck beside it
+        public const float kUwMiniExcavatorMinWidth = 3.9f; // mini excavator with the truck in line behind it (below: truck + crew truck)
+        public const float kUwLoaderMinWidth = 3.2f;     // loader / grader spreads the base course
+        public const float kUwRollerMinWidth = 2.6f;     // rollers compact the base and the fresh asphalt
+        public const float kUwFrontLoadAhead = 11f;      // mode H front loading: truck centre this far ahead of the excavator pivot (the
+                                                         // tail beyond the scrape; Machines refines it from the arm reach and box lengths)
+        public const float kUwFrontLoadAheadSmall = 6f;  // same for the mini excavator
+        public const float kUwMachineLatInset = 1.6f;    // a machine centre stays this far inside the machine-safe range (half a box + clearance)
+        public const float kUwDividerSpacing = 6f;       // divider cones along the inner edge of a band's closed part
+        public const float kUwVergeFenceGap = 4f;        // gap in the fence on the new road edge at each building access
+        // traffic-primitive switches for upgrade works (RRWGates holds the runtime copies). Lane drops with blockers and the
+        // apply-frame covers are on; the soft visual drop and the footprint hold stay off. Next to buildings a lane drop is never
+        // used (cars reach the dropped lane from parking and driveways): PhasePlan.WindowPrimitive enforces that.
+        public const bool kUwDropOn = true;              // lane drops with Traffic-owned blockers (only on edges without buildings)
+        public const bool kUwVisualDropOn = false;       // soft visual drop (Forbidden + caution) on band lanes: more cars used them, off
+        public const bool kUwPreCoverOn = true;          // bands covered from the apply frame
+        public const bool kUwNewParkingOffOn = true;     // EMPTY new parking lanes inside build bands disabled until their band opens
+        public const bool kUwFootprintHoldOn = false;    // old footprint held flat after a narrowing
+        public const bool kUwOldAsphaltOn = false;       // "RRW Old Asphalt" on the removed strip (else Base Course Cover until it is broken up)
 
         // ---- effect clones (verified in game)
         public const float kBeaconLux = 0.5f;            // RRW Amber Light intensity (vanilla CarAmberWarningSource is 10 lux: far too bright on a prop)

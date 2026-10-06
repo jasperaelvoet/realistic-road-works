@@ -83,9 +83,11 @@ namespace RealisticRoadWorks.V3.Machines
                 working++;
                 if (!c.ReadyOk) { Gate(st, MachineRole.Roller, "re-plan held: ", c.NoSpawnWhy); continue; }
                 bool frontModel = p.Plan.FrontA.Swap != c.Front.Swap || p.Plan.FrontA.Floor != c.Front.Floor ||
-                                  p.Plan.FrontA.Crews != c.Front.Crews || p.Plan.FrontA.Crew != c.Front.Crew;
+                                  p.Plan.FrontA.Crews != c.Front.Crews || p.Plan.FrontA.Crew != c.Front.Crew ||
+                                  (c.Upgrade && !p.Plan.FrontA.SameUpgradeBand(c.Front));   // mode H: band phase changed
                 int key = RollerIntentKey(rs, c);
-                bool force = force0 || p.PlannedTrackRevision != td.Revision || p.PlannedPhase != pr.Phase || frontModel || key != p.IntentKey;
+                // (the crew's phase: the project phase, for mode H band crews their band's equivalent phase)
+                bool force = force0 || p.PlannedTrackRevision != td.Revision || p.PlannedPhase != c.View.Phase || frontModel || key != p.IntentKey;
                 if (force || now >= p.ReplanAt)
                 {
                     var saved = p.Plan;
@@ -116,8 +118,10 @@ namespace RealisticRoadWorks.V3.Machines
             var cs = c.CS;
             int bit = 1 << idx;
             float anchor = math.clamp(rs.Slot.U, c.Trim0, c.Trim1);
-            var probe = new Puppet { Kind = MachineKind.Roller, Role = MachineRole.Roller, IsRoller = true, RollerIndex = idx, Seed = (ushort)c.Project.Seed };
+            var probe = new Puppet { Kind = MachineKind.Roller, Role = MachineRole.Roller, IsRoller = true, RollerIndex = idx, Seed = (ushort)c.Project.Seed,
+                                     Upgrade = c.Upgrade, UwBand = c.LateralMetres ? c.UwBand : -1 };
             Size(probe);
+            if (c.LateralMetres) anchor = Choreo.ClampU(c, probe, anchor);
             Choreo.RollerLatRange(c, probe, anchor, rs.WorksHalfOnly, out float latLo, out float latHi);
             float lat0 = PhasePlan.RollerPassLateral((int)(probe.Seed % 7u) + idx * 3, latLo, latHi, RRWConst.kRollerPassShift);
             bool atAnchor = c.State.SpawnAtAnchor;   // after a load, rebuild or ModelReset: directly at the anchor (same rule as the puppets)
@@ -172,6 +176,7 @@ namespace RealisticRoadWorks.V3.Machines
                 ProjectId = c.Project.Id, Role = MachineRole.Roller, Kind = MachineKind.Roller, IsRoller = true, RollerIndex = idx, Prefab = Entity.Null,
                 Seed = (ushort)(c.Project.Seed + idx * 131 + c.CrewIndex * 977), SpawnUpdate = RRWClock.UpdateIndex, Track = c.Track,
                 Crew = c.CrewIndex, LimPhase = c.View.Phase, Duty = rs.Duty,
+                Upgrade = c.Upgrade, UwBand = c.LateralMetres ? c.UwBand : -1,
             };
             Size(p);
             var rnd = new Unity.Mathematics.Random((uint)(c.Project.Seed * 7919u + 104729u * 7u + (uint)c.CrewIndex * 15485863u + (uint)idx * 31u) | 1u);
@@ -182,8 +187,11 @@ namespace RealisticRoadWorks.V3.Machines
                 if (RRWLog.VerboseEnabled) RRWLog.Verbose("machines: roller spawn of p" + c.Project.Id + "/c" + c.CrewIndex + "/" + idx + " deferred: no free spot near u=" + RRWLog.F(u0));
                 return null;
             }
-            var zSpawn = StandZones(c, p, u0, lat0) & RoadZones.AllLanes & ~c.Ready;
-            if (zSpawn != RoadZones.None) { Gate(c.State, MachineRole.Roller, "roller spawn box touches a not-ready group", null); return null; }
+            if (c.LateralMetres ? !UwSpawnBoxOk(c, p, u0, lat0) : (StandZones(c, p, u0, lat0) & RoadZones.AllLanes & ~c.Ready) != RoadZones.None)
+            {
+                Gate(c.State, MachineRole.Roller, c.LateralMetres ? "roller spawn box outside the band's machine-safe run" : "roller spawn box touches a not-ready group", null);
+                return null;
+            }
             if ((cs.RollerAnchorMask & bit) != 0) { cs.RollerAnchorMask &= ~bit; MxSpeed.HandAnchorSpawns++; }
             try { TrackBuilder.EnsureY(em, m_Terrain, c.Track, u0 - 20f, u0 + 20f); }
             catch (Exception ex) { RRWLog.ErrorOnce("machines roller spawn track y", ex); }
@@ -260,7 +268,7 @@ namespace RealisticRoadWorks.V3.Machines
         // A leaving roller of the project (not released / completed) that reaches u within kHandOverLateSeconds at its limits.
         private Puppet FindRelay(PlanContext c, float u, double now)
         {
-            if (c.Releasing) return null;
+            if (c.Releasing || c.Upgrade) return null;   // mode H: a leaving roller drives off along its own band
             Puppet best = null;
             float bestT = RRWConst.kHandOverLateSeconds;
             var lim = MachineLimits.Of(MachineRole.Roller, c.View.Phase);
@@ -332,6 +340,7 @@ namespace RealisticRoadWorks.V3.Machines
                     {
                         var p = m_RollerScratch[q];
                         if (p.Plan.Count <= 0) continue;
+                        if (c.Upgrade && p.Crew != i) continue;   // mode H: never across to another band
                         MachineMotion.State(p.Plan, c.Clk, now, out var s);
                         float t = MachineLimits.MinLegSeconds(anchor - s.U, lim.VFwd, lim.Accel);
                         if (t <= lateS) m_HoPairs.Add(new HoPair { P = q, Crew = slotId, T = t, Late = t > budgetS });

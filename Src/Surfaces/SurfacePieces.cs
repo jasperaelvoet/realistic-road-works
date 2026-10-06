@@ -23,7 +23,7 @@ namespace RealisticRoadWorks.V3.Surfaces
     {
         const float kTol = 0.05f;
         const float kPieceMergeGap = 0.05f;    // edge-local pieces closer than this are one piece (numeric seams)
-        const int kMaxPairs = 2 * EdgeSection.kMaxIntervals;
+        const int kMaxPairs = 32;              // upgrade works pair every overlapping sub-strip layer (2 * kMaxIntervals otherwise)
 
         private readonly TrackedArea[] m_Row = new TrackedArea[EdgeSurf.kMaxPieces];
         private readonly TrackedArea[] m_NewRow = new TrackedArea[EdgeSurf.kMaxPieces];
@@ -40,6 +40,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         // m_DCount / m_DS0 / m_DS1 for every (layer, band slot) of the edge in c.
         private void DesiredPieces(EdgeCtx c)
         {
+            if (c.Upgrade) { DesiredPiecesUpgrade(c); return; }
             var es = c.Es;
             for (int l = 0; l < (int)SurfaceLayer.Count; l++)
             {
@@ -166,6 +167,13 @@ namespace RealisticRoadWorks.V3.Surfaces
             // re-snap scheduling: the floor moved >= kAreaResnapDepthDelta since our last write
             if (t.ResnapDue == 0 && c.Gr.m_StepUpdate != t.StepAtWrite && math.abs(c.Floor - t.FloorAtWrite) >= RRWConst.kAreaResnapDepthDelta)
                 t.ResnapDue = math.max(c.Gr.m_StepUpdate + (uint)kResnapDelay, m_Now + 1u);
+            // upgrade works: the terrain beside the road changes in the update the works are applied (a narrowed road gives its
+            // strip back) and the CPU height readback lags it, so every piece is written once more after it first appeared
+            if (c.Upgrade && !t.SnapChecked && t.BoundUpdate != 0)
+            {
+                t.SnapChecked = true;
+                if (t.ResnapDue == 0) t.ResnapDue = math.max(t.BoundUpdate + (uint)kResnapDelay, m_Now + 1u);
+            }
 
             // hand-over clamp: a shrinking side never uncovers what the coverer (or the row's other pieces) has not covered
             // for >= 1 update yet
@@ -178,7 +186,7 @@ namespace RealisticRoadWorks.V3.Surfaces
                 if (!DeferTimedOut(t)) ClampShrink(c, layer, band, i, t, ref w0, ref w1);
             }
             bool clamped = math.abs(w0 - ls0) > kTol || math.abs(w1 - ls1) > kTol;
-            bool geomChanged = t.GeomRev != c.Rec.GeometryRevision || t.EndsHash != es.Ends.Hash;
+            bool geomChanged = t.GeomRev != c.Rec.GeometryRevision || t.EndsHash != es.Ends.Hash || (c.Upgrade && UpgradeLatMoved(c, t));
             bool spanChanged = math.abs(w0 - t.LS0) >= kRewriteThreshold || math.abs(w1 - t.LS1) >= kRewriteThreshold
                                || Touches(w0, 0f) != Touches(t.LS0, 0f) || Touches(w1, c.L) != Touches(t.LS1, c.L);
             bool resnap = t.ResnapDue != 0 && m_Now >= t.ResnapDue;
@@ -247,7 +255,7 @@ namespace RealisticRoadWorks.V3.Surfaces
                         bool grows = d0 <= t.LS0 + kTol && d1 >= t.LS1 - kTol;   // growing never uncovers anything
                         if (grows && !t.Pending && t.Live(m_Em) && (desired == Entity.Null || t.Prefab == desired))
                         {
-                            bool geomChanged = t.GeomRev != c.Rec.GeometryRevision || t.EndsHash != es.Ends.Hash;
+                            bool geomChanged = t.GeomRev != c.Rec.GeometryRevision || t.EndsHash != es.Ends.Hash || (c.Upgrade && UpgradeLatMoved(c, t));
                             bool moved = math.abs(d0 - t.LS0) >= kTol || math.abs(d1 - t.LS1) >= kTol;
                             if (!geomChanged && !moved) keep = t;
                             else if (BuildStrip(c, layer, band, kind, d0, d1, out float g0, out float g1) && RewriteArea(t, m_Poly))
@@ -330,7 +338,7 @@ namespace RealisticRoadWorks.V3.Surfaces
 
         private bool OutgoingCovered(EdgeCtx c, TrackedArea t)
         {
-            BuildPairs(c, t.Layer, t.Band, t.BandKind, -1);
+            BuildPairs(c, t.Layer, t.Band, t.BandKind, -1, t.LatLo, t.LatHi);
             for (int p = 0; p < m_Pairs; p++)
                 if (FirstGap(t.LS0, t.LS1, m_Need[p], m_Have[p], true, out _, out _)) return false;
             return true;
@@ -370,6 +378,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             for (int i = 0; i < es.SplitSiblings.Count; i++)
             {
                 if (!SurfaceState.Edges.TryGetValue(es.SplitSiblings[i], out var sib)) return true;   // not processed yet
+                if (band >= sib.Slots) return true;   // its upgrade rows are not set up yet
                 for (int k = 0; k < sib.RowN[l, band]; k++)
                 {
                     var st = sib.Areas[l, band, k];
@@ -409,13 +418,21 @@ namespace RealisticRoadWorks.V3.Surfaces
         //     band-kind switch: every band of the current kind, each must show where it is wanted);
         //   * the covering layer: per coverer band its desired pieces vs its settled spans (C4 halves pair half with half).
         // Settled = on screen for >= 1 update (TrackedArea.SettledSpan: the previous span when rewritten this update).
-        private void BuildPairs(EdgeCtx c, SurfaceLayer layer, int band, SurfaceBand pieceKind, int exclude)
+        private void BuildPairs(EdgeCtx c, SurfaceLayer layer, int band, SurfaceBand pieceKind, int exclude, float latLo = float.NaN, float latHi = float.NaN)
         {
             m_Pairs = 0;
             int l = (int)layer;
             var kind = m_BandKind[l];
+            if (c.Upgrade && pieceKind == kind)
+            {
+                // upgrade works: every layer of every sub-strip that overlaps this one sideways (UpgradePairs)
+                UpgradePairs(c, l, band, exclude, latLo, latHi);
+                return;
+            }
+            int slots = c.Upgrade ? c.Es.Slots : EdgeSection.kMaxIntervals;
             if (pieceKind == kind) AddPair(c, l, band, kind, exclude);
-            else for (int b = 0; b < EdgeSection.kMaxIntervals; b++) AddPair(c, l, b, kind, -1);
+            else for (int b = 0; b < slots; b++) AddPair(c, l, b, kind, -1);
+            if (c.Upgrade) return;   // a band-kind switch of upgrade works waits for the new kind's rows only
             int cov = CovererOf(c.Project.Kind, c.Project.Phase, layer);
             if (cov < 0) return;
             var covKind = m_BandKind[cov];
@@ -453,7 +470,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         // where the shown part ends.
         private void ClampShrink(EdgeCtx c, SurfaceLayer layer, int band, int piece, TrackedArea t, ref float w0, ref float w1)
         {
-            BuildPairs(c, layer, band, t.BandKind, piece);
+            BuildPairs(c, layer, band, t.BandKind, piece, t.LatLo, t.LatHi);
             if (m_Pairs == 0) return;
             if (w0 > t.LS0 + kTol)
             {

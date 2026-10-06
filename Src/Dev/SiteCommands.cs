@@ -474,6 +474,8 @@ namespace RealisticRoadWorks.V3.DevCmds
             catch (global::System.Exception e) { problems.Add("R4Dev check failed: " + e.GetType().Name + ": " + e.Message); }
             try { R5Dev.Invariants(em, problems); }
             catch (global::System.Exception e) { problems.Add("R5Dev check failed: " + e.GetType().Name + ": " + e.Message); }
+            try { UwCheck.Invariants(em, problems); }
+            catch (global::System.Exception e) { problems.Add("upgrade works check failed: " + e.GetType().Name + ": " + e.Message); }
             foreach (var kv in RRWIntrospection.Checkers)
             {
                 try { kv.Value(em, problems); }

@@ -11,7 +11,8 @@ using Unity.Mathematics;
 // in the chain frame (centre = u/lat + heading x BoxOffZ, half extents projected on the heading), its lateral interval is
 // classified with RoadZoneMath.OfLateral against the EdgeSection under the box (both box ends), and Outside is added when
 // RoadZoneMath.OutsideFootprint(uMin, uMax, Trim0, Trim1). MachinesOnCarriageway counts puppets whose zones include
-// LeftHalf, RightHalf or Outside.
+// LeftHalf, RightHalf or Outside. Puppets of a mode H project add the verge bits (RoadZoneMath.OfBand: on the verge or the removed
+// strip beyond the new road edge).
 namespace RealisticRoadWorks.V3.Machines
 {
     // One cached report sample: zones of the box at a plan instant; counts while now <= Until.
@@ -215,8 +216,12 @@ namespace RealisticRoadWorks.V3.Machines
             float el = math.abs(h.y) * hl + math.abs(h.x) * hw;
             // Shuttle strokes / Scrape bumps move u inside the leg: the samples cover them (<= 0.5 s apart)
             var z = RoadZones.None;
-            if (TrackBuilder.SectionAt(td, cu - eu, out var s0, out bool r0)) z |= RoadZoneMath.OfLateral(cl - el, cl + el, s0, r0);
-            if (TrackBuilder.SectionAt(td, cu + eu, out var s1, out bool r1)) z |= RoadZoneMath.OfLateral(cl - el, cl + el, s1, r1);
+            // mode H: the verge / terrain bits too (machines beside the road edge; they never hold a lane group)
+            bool verge = p.Upgrade;
+            if (TrackBuilder.SectionAt(td, cu - eu, out var s0, out bool r0))
+                z |= verge ? RoadZoneMath.OfBand(cl - el, cl + el, s0, r0) : RoadZoneMath.OfLateral(cl - el, cl + el, s0, r0);
+            if (TrackBuilder.SectionAt(td, cu + eu, out var s1, out bool r1))
+                z |= verge ? RoadZoneMath.OfBand(cl - el, cl + el, s1, r1) : RoadZoneMath.OfLateral(cl - el, cl + el, s1, r1);
             else if (z == RoadZones.None && !TrackBuilder.SectionAt(td, cu, out _, out _))
             {
                 // no section known (track gone): anything within the old flat floor counts as the carriageway

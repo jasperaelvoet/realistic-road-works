@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Unity.Entities;
+using Unity.Mathematics;
 
 namespace RealisticRoadWorks.V3
 {
@@ -85,6 +86,36 @@ namespace RealisticRoadWorks.V3
                 chains.Add(chain);
             }
             return chains;
+        }
+
+        // Splits a chain into consecutive runs: cutBefore holds edge indices (ascending, 0 < i < Edges.Count) where a new run starts.
+        // Each run is a chain of its own whose coordinates start at 0 (the edges keep their direction along the chain). Used by
+        // SiteFactory.CreateUpgradeProjects when one chain holds more upgrade bands than one project can carry.
+        public static List<Chain> SplitRuns(Chain chain, IList<int> cutBefore)
+        {
+            var runs = new List<Chain>();
+            if (chain == null || chain.Edges.Count == 0) return runs;
+            int start = 0;
+            int ci = 0;
+            while (start < chain.Edges.Count)
+            {
+                int end = chain.Edges.Count;
+                while (cutBefore != null && ci < cutBefore.Count && cutBefore[ci] <= start) ci++;
+                if (cutBefore != null && ci < cutBefore.Count && cutBefore[ci] < end) end = cutBefore[ci];
+                var run = new Chain();
+                float b = math.min(chain.Edges[start].U0, chain.Edges[start].U1);
+                float u = 0f;
+                for (int i = start; i < end; i++)
+                {
+                    var e = chain.Edges[i];
+                    run.Edges.Add(new ChainEdgeOut { Edge = e.Edge, U0 = e.U0 - b, U1 = e.U1 - b });
+                    u = math.max(u, math.max(e.U0, e.U1) - b);
+                }
+                run.Length = u;
+                runs.Add(run);
+                start = end;
+            }
+            return runs;
         }
     }
 }

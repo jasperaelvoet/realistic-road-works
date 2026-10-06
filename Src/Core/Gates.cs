@@ -51,6 +51,17 @@ namespace RealisticRoadWorks.V3
         public static bool TempLineLodBias = false;            // m_LodBias = +1 on the clone when dashes vanish at 300 m
         public static bool HalfCovers = true;                  // C4 per-half Fresh Asphalt (Cover) bands (false = one full-width cover)
 
+        // ---- upgrade works (mode H). Read at project creation (SiteFactory: AllAtOnce, PreCover) and every update (Director:
+        //      PhasePlan.WindowPrimitive; Traffic: blockers, parking; Surfaces: layers). A switch turned off later only weakens what
+        //      a running project does (the saved primitive is a ceiling), it never strengthens it.
+        public static bool UpgradeDrop = RRWConst.kUwDropOn;               // lane drops with Traffic-owned blockers; false = no lane drop
+                                                                           // at all. Never next to buildings (PhasePlan.WindowPrimitive)
+        public static bool UpgradeVisualDrop = RRWConst.kUwVisualDropOn;   // soft visual drop on band lanes (never machine-safe)
+        public static bool UpgradePreCover = RRWConst.kUwPreCoverOn;       // bands covered from the apply frame
+        public static bool UpgradeNewParkingOff = RRWConst.kUwNewParkingOffOn; // empty new parking lanes of build bands disabled until opened
+        public static bool UpgradeFootprintHold = RRWConst.kUwFootprintHoldOn; // old footprint held flat after a narrowing (Ground)
+        public static bool UpgradeOldAsphalt = RRWConst.kUwOldAsphaltOn;   // removed strip shows "RRW Old Asphalt" until it is broken up
+
         public static void Changed() => Revision++;
 
         // Names accepted by `rrw.gate` (Src/Dev parses them).
@@ -59,7 +70,35 @@ namespace RealisticRoadWorks.V3
             "closedb", "soft", "c4swap", "d0sidewalks", "deadend",
             "fence", "fencelat", "divider", "signs", "signflip", "amber", "signalflip", "conelamps",
             "arrow", "lineSrc", "lineW", "lineRound", "lineQueue", "lineLod", "halfcovers",
+            "uwdrop", "uwvdrop", "uwprecover", "uwparkoff", "uwhold", "uwoldasph",
         };
+
+        // The upgrade-works switches by name (lower case): true + what = "name=value" when the name is one of them and the value
+        // parses (1/0, on/off, true/false); false otherwise (error says why when the name is known). Bumps Revision. Src/Dev's
+        // `rrw.gate` hands every name it does not know itself to this.
+        public static bool TrySetUpgrade(string name, string value, out string what, out string error)
+        {
+            what = error = null;
+            string n = (name ?? "").ToLowerInvariant();
+            if (n != "uwdrop" && n != "uwvdrop" && n != "uwprecover" && n != "uwparkoff" && n != "uwhold" && n != "uwoldasph") return false;
+            string v = (value ?? "").ToLowerInvariant();
+            bool b;
+            if (v == "1" || v == "on" || v == "true") b = true;
+            else if (v == "0" || v == "off" || v == "false") b = false;
+            else { error = n + " expects 1/0"; return false; }
+            switch (n)
+            {
+                case "uwdrop": UpgradeDrop = b; break;
+                case "uwvdrop": UpgradeVisualDrop = b; break;
+                case "uwprecover": UpgradePreCover = b; break;
+                case "uwparkoff": UpgradeNewParkingOff = b; break;
+                case "uwhold": UpgradeFootprintHold = b; break;
+                default: UpgradeOldAsphalt = b; break;
+            }
+            Changed();
+            what = n + "=" + b;
+            return true;
+        }
 
         public static string Describe()
         {
@@ -70,7 +109,9 @@ namespace RealisticRoadWorks.V3
                 + " signflip=" + SignYawFlip + " amber=" + AmberHead + " signalflip=" + SignalYawFlip + " conelamps=" + ConeLamps
                 + " | arrow=" + ArrowBoard
                 + " | lineSrc=" + TempLineSource + " lineW=" + TempLineWidth.ToString("0.###", ic) + " lineRound=" + TempLineRoundness.ToString("0.###", ic)
-                + " lineQueue=" + TempLineQueueRaise + " lineLod=" + TempLineLodBias + " halfcovers=" + HalfCovers;
+                + " lineQueue=" + TempLineQueueRaise + " lineLod=" + TempLineLodBias + " halfcovers=" + HalfCovers
+                + " | uwdrop=" + UpgradeDrop + " uwvdrop=" + UpgradeVisualDrop + " uwprecover=" + UpgradePreCover
+                + " uwparkoff=" + UpgradeNewParkingOff + " uwhold=" + UpgradeFootprintHold + " uwoldasph=" + UpgradeOldAsphalt;
         }
     }
 

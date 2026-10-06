@@ -28,7 +28,8 @@ namespace RealisticRoadWorks.V3.Director
                     + " legacyPausedCleared=" + WorksDirectorSystem.LegacyPausedCleared
                     + " releasesOpened=" + DirectorShared.ReleasesOpened + " releasesCapped=" + DirectorShared.ReleasesCapped
                     + " crewLatches=" + DirectorShared.CrewLatches + " restored=" + DirectorShared.CrewLatchesRestored + " crewChanges=" + DirectorShared.CrewChanges + " midPhase=" + DirectorShared.CrewChangesMidPhase
-                    + " focusSwitches=" + DirectorShared.FocusSwitches + " allowanceDegraded=" + DirectorShared.AllowanceDegraded);
+                    + " focusSwitches=" + DirectorShared.FocusSwitches + " allowanceDegraded=" + DirectorShared.AllowanceDegraded
+                    + " upgrades=" + DirectorShared.UpgradesAdopted + " upgradeCancelsRefused=" + DirectorShared.UpgradeCancelsRefused);
             foreach (var p in list)
             {
                 var ps = p.Get<DirProjectState>(ModuleSlot.Director);
@@ -241,6 +242,89 @@ namespace RealisticRoadWorks.V3.Director
                     + " catchUp=" + DirectorShared.PreviewCatchUpTotal
                     + " probeUnhidden=" + DirectorShared.ProbeUnhiddenWorks + "/" + DirectorShared.ProbeUnhiddenTotal
                     + ((visibleOfHidden == 0 && tempWithComponent == 0) ? " OK" : " FAIL"));
+        }
+    }
+
+    // Upgrade works: one line per project (window, primitive, zones, switch bookkeeping, runtime), one per chain band (its view,
+    // g, state) and one per edge (tail, chain indices, sub-strips, keep-outs, Traffic's drop report).
+    public sealed class UwCommand : IDevCommand
+    {
+        public string Name => "rrw.uw.dir";
+        public string Help => "rrw.uw.dir [projectId] - Director view of upgrade works: windows, primitives (saved ceilings), zones, machine-safe zones, corridor, detour, bands, edges";
+        public void Run(DevContext ctx, string[] a)
+        {
+            uint only = 0;
+            if (a.Length > 0) uint.TryParse(a[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out only);
+            var list = new List<ProjectRecord>();
+            foreach (var p in SiteRegistry.Projects.Values) if (p.Upgrade != null && (only == 0 || p.Id == only)) list.Add(p);
+            list.Sort((x, y) => x.Id.CompareTo(y.Id));
+            ctx.Log("rrw uw.dir projects=" + list.Count + " adopted=" + DirectorShared.UpgradesAdopted + " rebuilds=" + DirectorShared.UpgradeRebuilds
+                    + " stamps=" + DirectorShared.UpgradeStamps + " cancelsRefused=" + DirectorShared.UpgradeCancelsRefused + " ended=" + DirectorShared.UpgradesEnded
+                    + " edgesLeft=" + DirectorShared.UpgradeEdgesLeft + " mixes=" + DirectorShared.UpgradeMixes + " gates: " + RRWGates.Describe());
+            foreach (var p in list)
+            {
+                var ps = p.Get<DirProjectState>(ModuleSlot.Director);
+                var sb = new System.Text.StringBuilder(256);
+                sb.Append("rrw uw.dir p").Append(p.Id).Append(' ').Append(p.Kind).Append(" mode=").Append(p.Mode).Append(" p=").Append(RRWLog.F(p.Progress))
+                  .Append(' ').Append(p.Phase).Append(" f=").Append(RRWLog.F(p.PhaseFraction)).Append(" crews=").Append(p.Crews)
+                  .Append(" machines=").Append(p.AllowMachines).Append(" closure=").Append(p.Closure).Append(" switch=").Append(p.Switch)
+                  .Append(" open=").Append(p.OpenLanes).Append(" soft=").Append(p.SoftZones).Append(" ready=").Append(p.WorkZonesReady);
+                DirectorIntrospection.AppendUpgrade(sb, p, ps);
+                ctx.Log(sb.ToString().Replace("\ndirector upgrade #" + p.Id, " |"));
+                var u = p.View().Upgrade;
+                for (int i = 0; i < u.BandCount; i++)
+                {
+                    int crew = u.CrewOfBand(i);
+                    ctx.Log("rrw uw.dir p" + p.Id + " band " + i + " " + u.Band(i).ToString() + " g=" + RRWLog.F(u.BandG(i)) + " state=" + u.StateOf(i)
+                            + (crew >= 0 ? " crew " + crew : ""));
+                }
+                for (int i = 0; i < p.Edges.Count; i++)
+                    if (SiteRegistry.TryGetEdge(p.Edges[i], out var r))
+                        ctx.Log("rrw uw.dir p" + p.Id + " edge " + RRWLog.E(r.Edge) + " #" + i + " " + DirectorIntrospection.DescribeUpgradeEdge(r, p.Upgrade));
+            }
+            if (list.Count == 0) ctx.Log("rrw uw.dir: no upgrade project" + (only != 0 ? " #" + only : ""));
+        }
+    }
+
+    // Jump an upgrade project to a window (dev), like rrw.phase for the other works: SetProgress to the window's start + g of its
+    // length. The window switch re-runs from p (at a window start from Vacate, past it from Drain).
+    public sealed class UwJumpCommand : IDevCommand
+    {
+        public string Name => "rrw.uw.jump";
+        public string Help => "rrw.uw.jump <projectId> window=<1..N|setup|teardown> [g=0] - jump an upgrade project into a window (g = fraction of it); "
+                              + "then rrw.rebuild so the machines respawn at their plan positions";
+        public void Run(DevContext ctx, string[] a)
+        {
+            uint id = 0;
+            string win = null;
+            float g = 0f;
+            foreach (var arg in a)
+            {
+                if (arg.StartsWith("window=")) win = arg.Substring(7).ToLowerInvariant();
+                else if (arg.StartsWith("g=")) float.TryParse(arg.Substring(2), NumberStyles.Float, CultureInfo.InvariantCulture, out g);
+                else uint.TryParse(arg, NumberStyles.Integer, CultureInfo.InvariantCulture, out id);
+            }
+            if (id == 0 || win == null) { ctx.Log("rrw uw.jump: usage " + Help); return; }
+            if (!SiteRegistry.TryGetProject(id, out var p) || p.Upgrade == null) { ctx.Log("rrw uw.jump: no upgrade project #" + id); return; }
+            var sch = p.Upgrade.Schedule;
+            int n = sch.N;
+            g = Unity.Mathematics.math.saturate(g);
+            int w;
+            if (win == "setup") w = 0;
+            else if (win == "teardown") w = n + 1;
+            else if (!int.TryParse(win, NumberStyles.Integer, CultureInfo.InvariantCulture, out w) || w < 0 || w > n + 1)
+            {
+                ctx.Log("rrw uw.jump: window must be 1.." + n + ", setup or teardown (got '" + win + "')");
+                return;
+            }
+            float p0, p1;
+            if (w == 0) { p0 = 0f; p1 = sch.SetupP; }
+            else if (w > n) { p0 = sch.TeardownStart; p1 = 1f; }
+            else { p0 = sch.P0(w - 1); p1 = sch.P1(w - 1); }
+            float target = Unity.Mathematics.math.min(p0 + g * (p1 - p0), 0.9999f);
+            WorksRequests.Enqueue(new WorksRequest { Type = WorksRequestType.SetProgress, ProjectId = id, Value = target });
+            ctx.Log("rrw uw.jump p" + id + " " + (w == 0 ? "setup" : w > n ? "teardown" : "window " + w + "/" + n) + " g=" + RRWLog.F(g)
+                    + " p " + RRWLog.F(p.Progress) + " -> " + RRWLog.F(target) + " (applied by the Director's next update; then rrw.rebuild)");
         }
     }
 

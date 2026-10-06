@@ -85,6 +85,7 @@ namespace RealisticRoadWorks.V3.Machines
         {
             Mix(ref h, (uint)f.Phase | ((uint)f.Swap << 8) | ((uint)f.Crews << 16) | ((uint)f.Crew << 24));
             Mix(ref h, f.PStart); Mix(ref h, f.PEnd); Mix(ref h, f.U); Mix(ref h, f.Floor);
+            if (f.Upgrade != 0) { Mix(ref h, 0x5577u); Mix(ref h, f.Base); Mix(ref h, f.PMin); Mix(ref h, (uint)f.C4Stage); }   // a mode H band front
         }
 
         public static void Mix(ref ulong h, float v) => Mix(ref h, math.asuint(v));
@@ -320,7 +321,11 @@ namespace RealisticRoadWorks.V3.Machines
         public static long ClampedLegs, OverWork, FrontLag, EmergencyBrakes, SpeedViolations, AccelViolations, Samples;
         public static long HandKept, HandRemapped, HandLeft, HandAnchorSpawns, CrewLodSkips, HandLate, FeedCutAtBoundary;
         public static long RunUps;              // drives that took a straight run-up before a lane change (short u distance)   // HandLate: late relays (anchor in view)
+        // runaway guard (MxConst.kRunawayFactor): puppets stopped because they moved far faster than their role ever may, and
+        // speeds above that limit that were not carried into a new plan (a jump in the old plan). Both must stay 0.
+        public static long Runaways, RunawayClamps;
         public static string FirstSpeed = "", FirstAccel = "", LastSpeed = "", LastAccel = "", LastLag = "", LastClamp = "";
+        public static string FirstRunaway = "", FirstRunawayClamp = "";
         public static readonly float[] RoleMaxV = new float[(int)MachineRole.Count + 1];
         public static readonly float[] RoleMaxA = new float[(int)MachineRole.Count + 1];
         public static readonly float[] RoleMaxVRatio = new float[(int)MachineRole.Count + 1];
@@ -332,7 +337,9 @@ namespace RealisticRoadWorks.V3.Machines
             ClampedLegs = OverWork = FrontLag = EmergencyBrakes = SpeedViolations = AccelViolations = Samples = 0;
             HandKept = HandRemapped = HandLeft = HandAnchorSpawns = CrewLodSkips = HandLate = FeedCutAtBoundary = 0;
             RunUps = 0;
+            Runaways = RunawayClamps = 0;
             FirstSpeed = FirstAccel = LastSpeed = LastAccel = LastLag = LastClamp = "";
+            FirstRunaway = FirstRunawayClamp = "";
             Array.Clear(RoleMaxV, 0, RoleMaxV.Length);
             Array.Clear(RoleMaxA, 0, RoleMaxA.Length);
             Array.Clear(RoleMaxVRatio, 0, RoleMaxVRatio.Length);
@@ -364,14 +371,36 @@ namespace RealisticRoadWorks.V3.Machines
             s.LegKind == (byte)LegKind.Brake ? math.max(p.Lim.Accel, RRWConst.kEmergencyDecel) : p.Lim.Accel;
 
         // Forget the motion history (spawn, respawn at another pose): the next sample starts a new chord.
-        public static void Restart(Puppet p) { p.MonTau = double.NaN; p.MonVTau = double.NaN; }
+        public static void Restart(Puppet p) { p.MonTau = double.NaN; p.MonVTau = double.NaN; p.RunawaySamples = 0; }
+
+        // Fastest the role may ever move (forward, reversing or leaving) x kRunawayFactor: anything faster is a jump in a plan.
+        public static float RunawaySpeed(in MachineLimits lim) =>
+            MxConst.kRunawayFactor * math.max(0.1f, math.max(math.max(lim.VFwd, lim.VRev), lim.VLeave));
+
+        // A speed carried from the motion a new plan continues (velocity match, settle brake). Above RunawaySpeed (or NaN) it is
+        // not motion but a jump in the old plan: the new plan starts from rest instead (counted, logged once per puppet).
+        public static float Carried(Puppet p, float v, in MachineLimits lim, string where)
+        {
+            float cap = RunawaySpeed(lim);
+            if (!float.IsNaN(v) && math.abs(v) <= cap) return v;
+            RunawayClamps++;
+            string what = (p != null ? p.ToString() : "a puppet") + " v=" + RRWLog.F(v) + " above " + RRWLog.F(cap) + " m/s (" + where + ")";
+            if (FirstRunawayClamp.Length == 0) FirstRunawayClamp = what;
+            if (p == null || !p.RunawayLogged)
+            {
+                if (p != null) p.RunawayLogged = true;
+                RRWLog.Info("machines: carried speed of " + what + " is not real motion: the new plan starts from rest");
+            }
+            return 0f;
+        }
 
         // One observation per puppet per Director update (after the guard, i.e. the motion the mover will write). Chain-space
         // chord speed over >= kMonSpeedWindow and the change of the signed (nose) speed over >= kMonAccelWindow; the limit is the
         // larger of the two leg limits at the chord ends (a chord may straddle a leg boundary).
-        public static void Observe(Puppet p, double now)
+        // Returns true when p moved faster than RunawaySpeed in two samples in a row (the caller stops it).
+        public static bool Observe(Puppet p, double now)
         {
-            if (p.Plan.Count <= 0) return;
+            if (p.Plan.Count <= 0) return false;
             MachineMotion.State(p.Plan, MachineRegistry.Clock, now, out var s);
             p.NowU = s.U; p.NowLat = s.Lat;
             if (double.IsNaN(p.MonTau))
@@ -379,10 +408,10 @@ namespace RealisticRoadWorks.V3.Machines
                 p.MonTau = now; p.MonU = s.U; p.MonLat = s.Lat; p.MonLeg = s.LegKind;
                 p.MonVLimit = VLimit(p, s, s.Speed < -0.05f);
                 p.MonALimit = ALimit(p, s);
-                return;
+                return false;
             }
             double dt = now - p.MonTau;
-            if (dt < MxConst.kMonSpeedWindow) return;
+            if (dt < MxConst.kMonSpeedWindow) return false;
             float du = s.U - p.MonU, dl = s.Lat - p.MonLat;
             float dist = math.sqrt(du * du + dl * dl);
             float v = (float)(dist / dt);
@@ -431,12 +460,15 @@ namespace RealisticRoadWorks.V3.Machines
             }
             p.MonTau = now; p.MonU = s.U; p.MonLat = s.Lat; p.MonLeg = s.LegKind;
             p.MonVLimit = vlimNow; p.MonALimit = alimNow;
+            p.RunawaySamples = v > RunawaySpeed(p.Lim) ? p.RunawaySamples + 1 : 0;
+            return p.RunawaySamples >= 2;
         }
 
         public static string Summary() =>
             "clampedLegs=" + ClampedLegs + " overWork=" + OverWork + " frontLag=" + FrontLag + " emergencyBrakes=" + EmergencyBrakes +
             " speedViolations=" + SpeedViolations + " accelViolations=" + AccelViolations + " samples=" + Samples +
             " handOver(kept=" + HandKept + " remapped=" + HandRemapped + " left=" + HandLeft + " anchorSpawns=" + HandAnchorSpawns + " late=" + HandLate + ")" + " feedCutAtBoundary=" + FeedCutAtBoundary +
-            " planDeferred=" + MxBudget.DeferredTotal + " crewLodSkips=" + CrewLodSkips + " runUps=" + RunUps;
+            " planDeferred=" + MxBudget.DeferredTotal + " crewLodSkips=" + CrewLodSkips + " runUps=" + RunUps +
+            " runawayStops=" + Runaways + " runawayClamps=" + RunawayClamps;
     }
 }

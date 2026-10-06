@@ -371,6 +371,11 @@ namespace RealisticRoadWorks.V3.Machines
             var r5 = new List<string>();
             MachineChecks.Round5(em, r5, !quiet);   // (the object sweep allocates: not in watch mode)
             problems.AddRange(r5);
+            // mode H: boxes inside their band's machine-safe run with the clearances, driveway keep-outs, front-dump slew
+            var ru = new List<string>();
+            MachineChecks.RoundUpgrade(em, ru);
+            problems.AddRange(ru);
+            stats += " | " + MxUpgradeStats.Summary();
             stats += " | rollersDig " + MachineChecks.Round5Summary();
             stats += " | separation " + MachineDebug.Round7Summary();   // make-way, exit removals, compact turns, inline waits
             if (problems.Count == 0) { if (!quiet) ctx.Log("rrw mx check ok puppets=" + MachineRegistry.All.Count + stats + (worstY > 0f ? " worstFloor=" + worstYWho : "")); }

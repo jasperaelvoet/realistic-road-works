@@ -280,7 +280,8 @@ namespace RealisticRoadWorks.V3.Surfaces
         //   - their road was deleted -> removed in the same update; a split re-keys them to the remnants instead;
         //   - their road was replaced in place (other road type, moved curve) -> removed;
         //   - their junction node is hidden by works -> removed;
-        //   - another works edge's footprint overlaps the scar polygon (new works over an old scar) -> same rules.
+        //   - another works edge's footprint overlaps the scar polygon (new works over an old scar) -> same rules;
+        //   - upgrade works on the road (or overlapping it): clipped to the outside of the bands, not removed (UpgradeScar).
         // The demolition topsoil scar has no anchor, so deleting the demolished edge keeps it (the intended scar).
         private void ProcessScarConflicts()
         {
@@ -332,6 +333,13 @@ namespace RealisticRoadWorks.V3.Surfaces
                         if (m_Em.HasComponent<Hidden>(a.Entity) && NodeHasActiveWorks(a.Entity)) return "junction hidden by works";
                         continue;
                     }
+                    // upgrade works on the road: the road stays in use, the scar is clipped to the outside of the bands
+                    if (UpgradeScarApplies(m_Em, a.Entity, sc))
+                    {
+                        string u = UpgradeScar(sc, a.Entity, k);
+                        if (u != null) return u;
+                        continue;
+                    }
                     if (ReplacedInPlace(a)) return "road replaced";
                     string w = WorksConflict(a.Entity, sc);
                     if (w != null) return w;
@@ -342,6 +350,12 @@ namespace RealisticRoadWorks.V3.Surfaces
             for (int k = 0; k < sc.Conflicts.Count; k++)
             {
                 at = sc.Conflicts[k];
+                if (UpgradeScarApplies(m_Em, at, sc))
+                {
+                    string u = UpgradeScar(sc, at, -1);
+                    if (u != null) return u + " (overlap)";
+                    continue;
+                }
                 string w = WorksConflict(at, sc);
                 if (w != null) return w + " (overlap)";
             }
@@ -651,7 +665,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             if (m_Now - m_LastOrphanSweep >= kOrphanSweepInterval)
             {
                 m_LastOrphanSweep = m_Now;
-                SweepOrphans(false);
+                SweepOrphans(false, null);
             }
             if (m_Now - m_LastProjSweep >= kOrphanSweepInterval)
             {
@@ -667,57 +681,85 @@ namespace RealisticRoadWorks.V3.Surfaces
 
         private static readonly List<uint> s_DeadProjects = new List<uint>(16);
 
+        // Every area some Surfaces list still tracks (strips, replaced pieces, yellow lines, dev lines, caps, scars, retiring).
+        internal static void CollectTracked(HashSet<Entity> refs)
+        {
+            refs.Clear();
+            foreach (var es in SurfaceState.Edges.Values)
+            {
+                for (int l = 0; l < es.Areas.GetLength(0); l++)
+                    for (int b = 0; b < es.Areas.GetLength(1); b++)
+                        for (int k = 0; k < es.RowN[l, b]; k++)
+                            if (es.Areas[l, b, k] != null && es.Areas[l, b, k].Area != Entity.Null) refs.Add(es.Areas[l, b, k].Area);
+                for (int i = 0; i < es.Outgoing.Count; i++)
+                    if (es.Outgoing[i].Area != Entity.Null) refs.Add(es.Outgoing[i].Area);
+                for (int i = 0; i < es.TempRows.Count; i++)
+                    foreach (var t in es.TempRows[i].Pieces) if (t.Area != Entity.Null) refs.Add(t.Area);
+            }
+            foreach (var dl in SurfaceState.DevLines)
+                foreach (var t in dl.Pieces) if (t.Area != Entity.Null) refs.Add(t.Area);
+            foreach (var c in SurfaceState.Caps.Values)
+            {
+                if (c.Cover != null && c.Cover.Area != Entity.Null) refs.Add(c.Cover.Area);
+                if (c.Asphalt != null && c.Asphalt.Area != Entity.Null) refs.Add(c.Asphalt.Area);
+            }
+            foreach (var s in SurfaceState.Scars)
+            {
+                if (s.Area != null && s.Area.Area != Entity.Null) refs.Add(s.Area.Area);
+                if (s.Next != null && s.Next.Area != Entity.Null) refs.Add(s.Next.Area);
+            }
+            foreach (var r in SurfaceState.Retiring) refs.Add(r.Area);
+        }
+
         // Self-heal: delete live RRW areas that nothing tracks any more (an exception mid-update, a lost binding...).
-        // Areas are never saved, so this only ever removes our own leaks.
-        private void SweepOrphans(bool all)
+        // Areas are never saved, so this only ever removes our own leaks. why: logged reason of a one-off sweep (null for the
+        // periodic one).
+        private void SweepOrphans(bool all, string why)
         {
             if (m_OurAreas.IsEmptyIgnoreFilter || SurfaceState.CloneEntities.Count == 0) return;
             var refs = m_Referenced;
             refs.Clear();
-            if (!all)
-            {
-                foreach (var es in SurfaceState.Edges.Values)
-                {
-                    for (int l = 0; l < es.Areas.GetLength(0); l++)
-                        for (int b = 0; b < es.Areas.GetLength(1); b++)
-                            for (int k = 0; k < es.RowN[l, b]; k++)
-                                if (es.Areas[l, b, k] != null && es.Areas[l, b, k].Area != Entity.Null) refs.Add(es.Areas[l, b, k].Area);
-                    for (int i = 0; i < es.Outgoing.Count; i++)
-                        if (es.Outgoing[i].Area != Entity.Null) refs.Add(es.Outgoing[i].Area);
-                    for (int i = 0; i < es.TempRows.Count; i++)
-                        foreach (var t in es.TempRows[i].Pieces) if (t.Area != Entity.Null) refs.Add(t.Area);
-                }
-                foreach (var dl in SurfaceState.DevLines)
-                    foreach (var t in dl.Pieces) if (t.Area != Entity.Null) refs.Add(t.Area);
-                foreach (var c in SurfaceState.Caps.Values)
-                {
-                    if (c.Cover != null && c.Cover.Area != Entity.Null) refs.Add(c.Cover.Area);
-                    if (c.Asphalt != null && c.Asphalt.Area != Entity.Null) refs.Add(c.Asphalt.Area);
-                }
-                foreach (var s in SurfaceState.Scars)
-                {
-                    if (s.Area != null && s.Area.Area != Entity.Null) refs.Add(s.Area.Area);
-                    if (s.Next != null && s.Next.Area != Entity.Null) refs.Add(s.Next.Area);
-                }
-                foreach (var r in SurfaceState.Retiring) refs.Add(r.Area);
-            }
+            if (!all) CollectTracked(refs);
             var arr = m_OurAreas.ToEntityArray(Allocator.Temp);
             SxPerf.Count(SxC.OrphanSweeps);
             SxPerf.Count(SxC.OrphanScanned, arr.Length);
             int n = 0;
+            string first = null;
             try
             {
                 for (int i = 0; i < arr.Length; i++)
                 {
                     var e = arr[i];
-                    if (!SurfaceState.IsOurPrefab(m_Em.GetComponentData<PrefabRef>(e).m_Prefab)) continue;
+                    var prefab = m_Em.GetComponentData<PrefabRef>(e).m_Prefab;
+                    if (!SurfaceState.IsOurPrefab(prefab)) continue;
                     if (refs.Contains(e) || m_Em.HasComponent<Created>(e)) continue;
+                    if (first == null) first = DescribeArea(m_Em, e, prefab);
                     EcsUtil.MarkDeleted(m_Em, e);
                     n++;
                 }
             }
             finally { arr.Dispose(); }
-            if (n > 0 && !all) RRWLog.Warn("surfaces: removed " + n + " untracked work-site texture area(s) (self-heal)");
+            if (n == 0 || all) return;
+            SurfaceState.OrphansRemoved += n;
+            SurfaceState.LastOrphan = "u" + m_Now + " " + n + "x, first " + first + (why != null ? " (" + why + ")" : "");
+            RRWLog.Warn("surfaces: removed " + n + " untracked work-site texture area(s) (self-heal" + (why != null ? ", " + why : "") + "), first: " + first);
+        }
+
+        // "<clone> at (x, z), n nodes, project #p" for the logs and checks.
+        internal static string DescribeArea(EntityManager em, Entity area, Entity prefab)
+        {
+            string at = "";
+            int nodes = 0;
+            if (em.HasBuffer<AreaNode>(area))
+            {
+                var buf = em.GetBuffer<AreaNode>(area, true);
+                nodes = buf.Length;
+                float2 c = float2.zero;
+                for (int i = 0; i < buf.Length; i++) c += buf[i].m_Position.xz;
+                if (buf.Length > 0) { c /= buf.Length; at = " at (" + RRWLog.F(c.x) + ", " + RRWLog.F(c.y) + ")"; }
+            }
+            uint pid = em.HasComponent<RRWDerived>(area) ? em.GetComponentData<RRWDerived>(area).m_ProjectId : 0u;
+            return "\"" + SurfaceState.NameOf(prefab) + "\"" + at + ", " + nodes + " nodes" + (pid != 0 ? ", project #" + pid : "");
         }
     }
 }

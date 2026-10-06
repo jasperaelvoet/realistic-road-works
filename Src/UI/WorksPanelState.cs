@@ -85,7 +85,16 @@ namespace RealisticRoadWorks.V3.UI
         public int Crews = 1, FocusCrew, CrewsSpawned;
         public float SectionLength;            // trimmed chain length / Crews (m), for the dev dump and the section text
         public readonly float[] CrewFill = new float[RRWConst.kMaxCrewsPerProject];
-        public bool ShowCrews => Crews > 1 && !IsComplete && Mode == VisualMode.FullDig;
+        // Upgrade works: one crew per band of the current window, side by side along the whole road (CrewFill = each band's progress).
+        public bool ShowCrews => Crews > 1 && !IsComplete && (Mode == VisualMode.FullDig || IsUpgrade);
+
+        // ---- upgrade works (mode H)
+        // ModeH: any HalfWidth construction (no cancel and no cancel refund, also before its upgrade data is known).
+        // IsUpgrade: the project's view carries its upgrade data (ProjectView.IsUpgrade); View is that view (windows, band phases).
+        public bool ModeH => Mode == VisualMode.HalfWidth && Kind == WorksKind.Construction;
+        public bool IsUpgrade;
+        public UpgradeClass UpClass;           // project class (the saved edge class until the registry has the project)
+        public ProjectView View;
 
         private readonly List<Entity> m_Selected = new List<Entity>(32);
 
@@ -126,6 +135,9 @@ namespace RealisticRoadWorks.V3.UI
             FocusCrew = CrewsSpawned = 0;
             SectionLength = 0f;
             for (int i = 0; i < CrewFill.Length; i++) CrewFill[i] = 0f;
+            IsUpgrade = false;
+            UpClass = UpgradeClass.None;
+            View = default;
         }
 
         public bool IsComplete => Phase == WorksPhase.Complete || Completing;
@@ -260,8 +272,13 @@ namespace RealisticRoadWorks.V3.UI
                 StageReason = pr.StageBlockReason;
                 StageIndex = pr.StageIndex;
                 StageCount = pr.StageCount;
-                StagedC4 = pr.Kind == WorksKind.Construction && pr.Mode == VisualMode.FullDig && pr.Phase == WorksPhase.Finishing && pr.StageCtx.Staged;
-                ComputeCrews(pr);
+                View = pr.View();
+                IsUpgrade = View.IsUpgrade;
+                UpClass = IsUpgrade ? View.Upgrade.Class : first.UpClass;
+                // Upgrade works: the re-marking window under the one-direction primitive runs the staged markings layout of a new road.
+                StagedC4 = (pr.Kind == WorksKind.Construction && pr.Mode == VisualMode.FullDig && pr.Phase == WorksPhase.Finishing && pr.StageCtx.Staged)
+                           || (IsUpgrade && View.Upgrade.RemarkHalf);
+                ComputeCrews(pr, View);
             }
             else
             {
@@ -270,9 +287,14 @@ namespace RealisticRoadWorks.V3.UI
                 Phase = PhasePlan.PhaseOf(Kind, P, out F);
                 Flags = first.Flags;
                 Working = false;
+                UpClass = first.UpClass;
             }
             // Never let a stale record contradict the saved site's kind (cancel turns a construction into a demolition).
-            if (Kind != first.Kind) { Kind = first.Kind; P = first.Progress; Phase = PhasePlan.PhaseOf(Kind, P, out F); Crews = 1; FocusCrew = 0; }
+            if (Kind != first.Kind)
+            {
+                Kind = first.Kind; P = first.Progress; Phase = PhasePlan.PhaseOf(Kind, P, out F); Crews = 1; FocusCrew = 0;
+                IsUpgrade = false; View = default;
+            }
 
             Rushed = (Flags & SiteFlags.Rushed) != 0;
             Incompatible = (Flags & SiteFlags.Incompatible) != 0;
@@ -296,7 +318,7 @@ namespace RealisticRoadWorks.V3.UI
             Refund = 0;
             RushCost = 0;
             int rushPercent = s != null ? s.RushCostPercent : 50;
-            InstantCancel = Kind == WorksKind.Construction && P < RRWConst.kInstantCancelProgress && (s == null || s.InstantCancelUnfinished);
+            InstantCancel = !ModeH && Kind == WorksKind.Construction && P < RRWConst.kInstantCancelProgress && (s == null || s.InstantCancelUnfinished);
             for (int i = 0; i < ProjectEdges.Count; i++)
             {
                 Entity e = ProjectEdges[i];
@@ -320,6 +342,13 @@ namespace RealisticRoadWorks.V3.UI
                 }
                 float len = em.HasComponent<Curve>(e) ? em.GetComponentData<Curve>(e).m_Length : math.abs(site.m_ChainU1 - site.m_ChainU0);
                 Paid += math.max(0, site.m_PaidCost);
+                if (site.IsUpgrade && site.Mode == VisualMode.HalfWidth)
+                {
+                    // Upgrade works are never cancelled (the bulldozer ends them with its own refund); the rush floor is the
+                    // upgrade's share of a full rebuild of the chain with the new road's class.
+                    RushCost += WorkTime.RushCost(site, len, P, rushPercent, FullRebuildFrames(em, e, site, s));
+                    continue;
+                }
                 Refund += WorkTime.CancelRefund(math.max(0, site.m_PaidCost), P, InstantCancel);
                 RushCost += WorkTime.RushCost(math.max(0, site.m_PaidCost), len, P, rushPercent);
             }
@@ -330,7 +359,9 @@ namespace RealisticRoadWorks.V3.UI
             CanRush = !Rushed && !done && !Incompatible && P < 1f;
             if (!CanRush) RushCost = 0;
             CanAfford = CanRush && EcsUtil.CanAfford(em, city, (int)math.min(RushCost, int.MaxValue));
-            if (Kind == WorksKind.Construction)
+            if (ModeH)
+                CanCancel = false;
+            else if (Kind == WorksKind.Construction)
                 CanCancel = !done && !Incompatible;
             else
                 // Demolition: only D0, and never a cancelled build (calling that off would keep a road already refunded).
@@ -351,16 +382,31 @@ namespace RealisticRoadWorks.V3.UI
             else Eta = EtaState.Working;
         }
 
+        // Work frames of a full rebuild of the site's chain with the road's (new) class: the reference of an upgrade's rush floor.
+        // 0 (floor share 1) without settings.
+        public static uint FullRebuildFrames(EntityManager em, Entity edge, in RoadWorksSite site, RRWSetting s) =>
+            s == null ? 0u : WorkTime.FullRebuildFrames(site.m_ChainLength, EcsUtil.RoadClass(em, edge), s);
+
         // Crew count, focus crew and each crew's sweep through its own section. Pure reads of the record.
-        private void ComputeCrews(ProjectRecord pr)
+        // Upgrade works: the crews are the bands of the current window, each along the whole road; a crew's fill is its band's progress.
+        private void ComputeCrews(ProjectRecord pr, in ProjectView v)
         {
-            var v = pr.View();
             Crews = v.CrewCount;
             FocusCrew = math.clamp(pr.FocusCrew, 0, Crews - 1);
             CrewsSpawned = math.max(0, pr.CrewsSpawned);
             float trimmed = v.Trim1 - v.Trim0;
-            SectionLength = (trimmed > 0f ? trimmed : v.U) / Crews;
             for (int i = 0; i < CrewFill.Length; i++) CrewFill[i] = 0f;
+            if (v.IsUpgrade)
+            {
+                SectionLength = trimmed > 0f ? trimmed : v.U;
+                for (int i = 0; i < Crews && i < CrewFill.Length; i++)
+                {
+                    int band = v.Upgrade.CrewBand(i);
+                    CrewFill[i] = band >= 0 ? math.saturate(v.Upgrade.BandG(band)) : 0f;
+                }
+                return;
+            }
+            SectionLength = (trimmed > 0f ? trimmed : v.U) / Crews;
             for (int i = 0; i < Crews && i < CrewFill.Length; i++)
             {
                 float a = PhasePlan.SectionStart(i, Crews, v.U), b = PhasePlan.SectionStart(i + 1, Crews, v.U);
@@ -389,6 +435,14 @@ namespace RealisticRoadWorks.V3.UI
             // The crew count (latched per phase) and the focus crew (highlighted segment of the crew gauge).
             h = h * 31u + (uint)pr.Crews;
             h = h * 31u + (uint)pr.FocusCrew;
+            // Upgrade works: the current window's traffic primitive and reason (they change without a phase change).
+            if (pr.Mode == VisualMode.HalfWidth && pr.Upgrade != null && pr.Upgrade.Schedule.N > 0)
+            {
+                int lw = math.clamp(pr.Upgrade.LayoutWindowAt(pr.Progress), 0, RRWConst.kUwMaxWindows - 1);
+                h = h * 31u + (uint)lw;
+                h = h * 31u + (uint)pr.Upgrade.Primitive[lw] + ((uint)pr.Upgrade.WindowReason[lw] << 4);
+                h = h * 31u + (uint)pr.Upgrade.Revision;
+            }
             uint closure = 0, waiting = 0, open = 0, soft = 0, closedB = 0;
             bool any = false;
             for (int i = 0; i < pr.Edges.Count; i++)

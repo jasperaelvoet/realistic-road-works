@@ -168,6 +168,33 @@ namespace RealisticRoadWorks.V3.Props
         }
     }
 
+    // rrw.props.uw [p<id>|#n|all]: upgrade works (mode H) band devices: the device summary, then per band and edge the strips with
+    // their traffic state (Open / Draining / Ready / Free, drop lanes) and the device features found there.
+    public sealed class PropsUpgradeCommand : IDevCommand
+    {
+        public string Name => "rrw.props.uw";
+        public string Help => "rrw.props.uw [p<id>|#n|all] - upgrade works band devices: summary, per band and edge the strips with their state, divider / fence / cone / closed-part laterals";
+
+        public void Run(DevContext ctx, string[] a)
+        {
+            var sys = ctx.World.GetExistingSystemManaged<PropSystem>();
+            if (sys == null) { PropsDev.Log("uw: PropSystem not running"); return; }
+            uint want = PropsDev.Project(PropsDev.Arg(a, 0, "all"));
+            var lines = new List<string>();
+            int shown = 0;
+            foreach (var kv in SiteRegistry.Projects)
+            {
+                if (want != 0 && kv.Key != want) continue;
+                if (want == 0 && !kv.Value.View().IsUpgrade) continue;
+                lines.Clear();
+                sys.DescribeUpgrade(kv.Key, lines);
+                foreach (var l in lines) PropsDev.Log("uw " + l);
+                shown++;
+            }
+            PropsDev.Log("uw projects=" + shown + (want != 0 && shown == 0 ? " (no project p" + want + ")" : ""));
+        }
+    }
+
     // rrw.props.respawn [p<id>|#n|all]: replace every prop of the project(s) at the next Modification1 (new first, then old deleted).
     public sealed class PropsRespawnCommand : IDevCommand
     {

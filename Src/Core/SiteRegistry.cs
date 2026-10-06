@@ -75,6 +75,10 @@ namespace RealisticRoadWorks.V3
         public bool ClassifyReversed;     // chain direction they were computed for (re-classify when it flips)
         public uint ClassifyUpdate;       // RRWClock.UpdateIndex of the last write (Director re-evaluates CarHalfAllowed when it changes)
         public bool Classified => ClassifyRevision == GeometryRevision;
+        // ---- upgrade works (mode H). Null on every edge that is not a mode H site. The Director creates it from the saved tail
+        // (UpgradeEdgeState.Load) and keeps its bands / sub-strips; Traffic writes the drop report, the Director the driveway
+        // keep-outs (see UpgradeEdgeState for the writer of every field).
+        public UpgradeEdgeState Upgrade;
         public readonly object[] Slots = new object[(int)ModuleSlot.Count];
 
         public T Get<T>(ModuleSlot s) where T : class => Slots[(int)s] as T;
@@ -184,9 +188,21 @@ namespace RealisticRoadWorks.V3
         public float CancelFront;
         public ClosureLevel Closure;      // closure target of the project this frame (max over its edges)
         public bool ClearingTraffic;      // demolition mobilisation: waiting for vehicles to leave
+        // ---- upgrade works (mode H). Null unless Mode == HalfWidth with a saved upgrade tail. The Director builds it from the
+        // edges' tails (UpgradeRuntime.Begin / AddEdge / Finish) and writes its per-window state every update; View() copies its
+        // pure part into ProjectView.Upgrade (UpgradeRuntime.View).
+        public UpgradeRuntime Upgrade;
 
-        // Pure view for PhasePlan.SurfaceSpan / Props / Crew.
-        public ProjectView View() => new ProjectView
+        // Pure view for PhasePlan.SurfaceSpan / Props / Crew. Mode H: UpgradeView.Applied* follow the switch step and the stage
+        // context (PhasePlan.FillUpgradeApplied).
+        public ProjectView View()
+        {
+            var v = ViewRaw();
+            PhasePlan.FillUpgradeApplied(ref v);
+            return v;
+        }
+
+        private ProjectView ViewRaw() => new ProjectView
         {
             Kind = Kind,
             Mode = Mode,
@@ -213,6 +229,7 @@ namespace RealisticRoadWorks.V3
             Crews = Crews,
             WorkSeconds = WorkSeconds,
             Rollers = Rollers,
+            Upgrade = Mode == VisualMode.HalfWidth && Upgrade != null ? Upgrade.View(Progress) : default,
         };
         public readonly object[] Slots = new object[(int)ModuleSlot.Count];
 
@@ -229,6 +246,12 @@ namespace RealisticRoadWorks.V3
     // The managed site registry. Rebuilt from the saved RoadWorksSite components after every load (Director),
     // cleared in OnGamePreload. Visual modules READ it and reconcile their own state against it each frame
     // ("pull" model): if an edge/project they track is no longer here, they tear their stuff down.
+    // The neighbours of one project of a split upgrade drag (project ids, 0 = none).
+    public struct CorridorLink
+    {
+        public uint Prev, Next;
+    }
+
     public static class SiteRegistry
     {
         public static readonly Dictionary<Entity, EdgeRecord> Edges = new Dictionary<Entity, EdgeRecord>();
@@ -236,6 +259,17 @@ namespace RealisticRoadWorks.V3
         public static uint NextProjectId = 1;
         public static int Revision;       // ++ whenever any record is added or removed
         public static bool Loaded;        // true once the Director rebuilt the registry for the current city
+
+        // Links between the projects of one split upgrade drag (SiteFactory.CreateUpgradeProjects writes them for every project
+        // of a split chain; the Director takes them at adopt into UpgradeRuntime.CorridorPrev / CorridorNext). Runtime only.
+        public static readonly Dictionary<uint, CorridorLink> PendingCorridors = new Dictionary<uint, CorridorLink>();
+
+        public static bool TakeCorridor(uint projectId, out CorridorLink link)
+        {
+            if (!PendingCorridors.TryGetValue(projectId, out link)) return false;
+            PendingCorridors.Remove(projectId);
+            return true;
+        }
 
         public static bool TryGetEdge(Entity e, out EdgeRecord r) => Edges.TryGetValue(e, out r);
         public static bool TryGetProject(uint id, out ProjectRecord p) => Projects.TryGetValue(id, out p);
@@ -306,6 +340,7 @@ namespace RealisticRoadWorks.V3
             if (Edges.Count > 0 || Projects.Count > 0) RRWLog.Info("registry cleared (" + why + "): " + Edges.Count + " edges, " + Projects.Count + " projects");
             Edges.Clear();
             Projects.Clear();
+            PendingCorridors.Clear();
             NextProjectId = 1;
             Revision++;
             Loaded = false;
@@ -330,6 +365,9 @@ namespace RealisticRoadWorks.V3
         CancelEdge = 12,     // Tools (bulldozer): cancel ONLY this edge: split it off into its own project, then Cancel that project
         CancelEdgeInstant = 13, // Tools (bulldozer) below kInstantCancelProgress: delete this edge + refund its paid
         SetCrews = 14,       // dev (rrw.crews): Value = crew count (0 = automatic latch); pinned until the next phase change, never below kMinSectionLength sections
+        EndUpgrade = 15,     // Tools (bulldozer on a mode H upgrade site): Edge leaves its upgrade project Aux (the OLD project id) before the
+                             // demolition site written in the same pass is adopted; Value = the refund already credited (log only). The other
+                             // edges of the project keep working. Never a cancel: no money moves in the Director.
     }
 
     public struct WorksRequest
@@ -340,6 +378,7 @@ namespace RealisticRoadWorks.V3
         public float Value;
         public WorksPhase Phase;
         public int Batch;            // dev Start*: requests with the same batch id form one project
+        public uint Aux;             // EndUpgrade: the project id the edge belonged to before the bulldozer wrote its demolition site
     }
 
     // UI (UIUpdate), settings buttons, dev commands and Tools enqueue; the Director drains at Mod1 (the only

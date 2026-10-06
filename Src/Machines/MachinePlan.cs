@@ -122,6 +122,7 @@ namespace RealisticRoadWorks.V3.Machines
         {
             MxPerf.Motion(MxC.FrontEvals);   // dev rrw.mx.perf (main thread, Director update only; compiled away in release)
             var ph = (WorksPhase)fr.Phase;
+            if (fr.Upgrade != 0) return UpgradeFront(fr, clk, tau);
             if (ph == WorksPhase.Complete) return fr.U;
             if (ph == WorksPhase.None || !(fr.U > 0f)) return 0f;
             double frames = (tau - clk.Tau0) * kFps / math.max(1e-4f, clk.Scale);
@@ -140,12 +141,36 @@ namespace RealisticRoadWorks.V3.Machines
             return PhasePlan.SectionFront(ph, math.saturate(f), fr.U, fr.Crews, fr.Crew, fr.Swap != 0, fr.Floor);
         }
 
+        // Front of a mode H band crew: the band's equivalent phase fraction from project progress (never below the band's window
+        // start), swept over [Base, Base + U] like PhasePlan.UpgradeBandFront (the C4 fronts for the re-marking band under Half).
+        static float UpgradeFront(in FrontRef fr, in ClockData clk, double tau)
+        {
+            var ph = (WorksPhase)fr.Phase;
+            if (ph == WorksPhase.Complete) return fr.Base + fr.U;
+            if (ph == WorksPhase.None || !(fr.U > 0f)) return fr.Base;
+            double frames = (tau - clk.Tau0) * kFps / math.max(1e-4f, clk.Scale);
+            double df = (double)unchecked((int)(clk.Frame0 - fr.Model.Frame0)) + frames;
+            double p = math.max(fr.Model.P0 + fr.Model.PPerFrame * df, (double)fr.PMin);
+            float ps = fr.PStart, pe = fr.PEnd;
+            float f = pe > ps + 1e-6f ? (float)((math.clamp(p, ps, pe) - ps) / (pe - ps)) : 0f;
+            if (ph == WorksPhase.Finishing && fr.Swap != 0 && fr.C4Stage != 0)
+            {
+                // the half the Director's stage paints now, never the other one (see FrontRef.C4Stage)
+                SweepWindow(ph, f, true, fr.C4Stage, out float a, out float b);
+                return fr.Base + fr.U * PhasePlan.Sweep(math.saturate(f), a, b);
+            }
+            return fr.Base + PhasePlan.MainFront(ph, math.saturate(f), fr.U, fr.Swap != 0, fr.Floor);
+        }
+
         public static float Front(in MachinePlan p, byte sel, in ClockData clk, double tau) =>
             sel == 0 ? Front(p.FrontA, clk, tau) : Front(p.FrontB, clk, tau);
 
         // Sweep window [a, b] of the phase fraction over which the front crosses its section (mirror of PhasePlan.MainFront;
         // rrw.mx.check "frontModel" compares FrontLin with Front).
-        public static void SweepWindow(WorksPhase ph, float f, bool swap, out float a, out float b)
+        public static void SweepWindow(WorksPhase ph, float f, bool swap, out float a, out float b) => SweepWindow(ph, f, swap, 0, out a, out b);
+
+        // c4Stage (FrontRef.C4Stage): 1 / 2 = the first / second half's sweep with the swap whatever f is; 0 = the half from f.
+        public static void SweepWindow(WorksPhase ph, float f, bool swap, byte c4Stage, out float a, out float b)
         {
             switch (ph)
             {
@@ -155,7 +180,7 @@ namespace RealisticRoadWorks.V3.Machines
                 case WorksPhase.Paving: a = 0.03f; b = 0.95f; return;
                 case WorksPhase.Finishing:
                     if (!swap) { a = 0f; b = 0.9f; return; }
-                    if (f < RRWConst.kC4SwapF - RRWConst.kStageSwitchTolF) { a = RRWConst.kC4aPaintF0; b = RRWConst.kC4aPaintF1; return; }
+                    if (c4Stage == 1 || (c4Stage == 0 && f < RRWConst.kC4SwapF - RRWConst.kStageSwitchTolF)) { a = RRWConst.kC4aPaintF0; b = RRWConst.kC4aPaintF1; return; }
                     a = RRWConst.kC4bPaintF0; b = RRWConst.kC4bPaintF1; return;
                 case WorksPhase.BreakUp:
                 case WorksPhase.Removal:
@@ -173,6 +198,7 @@ namespace RealisticRoadWorks.V3.Machines
             MxPerf.Motion(MxC.FrontEvals);
             var ph = (WorksPhase)fr.Phase;
             v = 0f;
+            if (fr.Upgrade != 0) { UpgradeFrontLin(fr, clk, tau, out flin, out v, out fmin, out fmax); return; }
             if (ph == WorksPhase.Complete) { flin = fmin = fmax = fr.U; return; }
             if (ph == WorksPhase.None || !(fr.U > 0f)) { flin = fmin = fmax = 0f; return; }
             float ps = fr.PStart, pe = fr.PEnd;
@@ -201,6 +227,39 @@ namespace RealisticRoadWorks.V3.Machines
             v = (float)(L * dsdt);
             fmin = sa + L * sMin;
             fmax = sb;
+        }
+
+        // FrontLin of a mode H band front (UpgradeFront): one section [Base, Base + U]; the band's window start (PMin) raises the
+        // lower clamp to the front at that progress.
+        static void UpgradeFrontLin(in FrontRef fr, in ClockData clk, double tau, out float flin, out float v, out float fmin, out float fmax)
+        {
+            var ph = (WorksPhase)fr.Phase;
+            v = 0f;
+            if (ph == WorksPhase.Complete) { flin = fmin = fmax = fr.Base + fr.U; return; }
+            if (ph == WorksPhase.None || !(fr.U > 0f)) { flin = fmin = fmax = fr.Base; return; }
+            float ps = fr.PStart, pe = fr.PEnd;
+            if (!(pe > ps + 1e-6f)) { flin = fmin = fmax = UpgradeFront(fr, clk, tau); return; }
+            double scale = math.max(1e-4f, clk.Scale);
+            double frames = (tau - clk.Tau0) * kFps / scale;
+            double df = (double)unchecked((int)(clk.Frame0 - fr.Model.Frame0)) + frames;
+            double p = fr.Model.P0 + fr.Model.PPerFrame * df;
+            double fRaw = (p - ps) / (pe - ps);
+            double dfdt = fr.Model.PPerFrame * kFps / scale / (pe - ps);
+            bool swap = fr.Swap != 0;
+            SweepWindow(ph, (float)math.clamp(fRaw, 0.0, 1.0), swap, fr.C4Stage, out float a, out float b);
+            double s = (fRaw - a) / (b - a);
+            double dsdt = dfdt / (b - a);
+            float sMin = ph == WorksPhase.Finishing && !swap ? math.saturate(math.clamp(fr.Floor, 0f, fr.U) / fr.U) : 0f;
+            if (fr.PMin > ps)
+            {
+                double fMin = (fr.PMin - ps) / (pe - ps);
+                sMin = math.max(sMin, math.saturate((float)((fMin - a) / (b - a))));
+            }
+            float L = fr.U;
+            flin = (float)(fr.Base + L * s);
+            v = (float)(L * dsdt);
+            fmin = fr.Base + L * sMin;
+            fmax = fr.Base + L;
         }
 
         public static void FrontLin(in MachinePlan p, byte sel, in ClockData clk, double tau, out float flin, out float v, out float fmin, out float fmax)

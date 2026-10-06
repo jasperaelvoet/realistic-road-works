@@ -37,6 +37,7 @@ namespace RealisticRoadWorks.V3.Director
         private EntityQuery m_AllSitesQuery;   // RoadWorksSite + Edge, not Temp / Deleted
         private EntityQuery m_NewSitesQuery;   // ... without RoadWorksRuntime
         private EntityQuery m_DerivedQuery;    // RRWDerived, not Deleted
+        private EntityQuery m_MachineQuery;    // RRWMachine puppet roots and parts with a Transform, not Deleted (upgrade hand-over)
 
         // The core guard disables the Director after 30 consecutive failures (RRWGuard). Optional features have their
         // own guards so a failing icon / wear / GC pass never stops progress, hiding or completion.
@@ -96,6 +97,11 @@ namespace RealisticRoadWorks.V3.Director
                 All = new[] { ComponentType.ReadOnly<RRWDerived>() },
                 None = new[] { ComponentType.ReadOnly<Deleted>() },
             });
+            m_MachineQuery = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[] { ComponentType.ReadOnly<RRWMachine>(), ComponentType.ReadOnly<Game.Objects.Transform>() },
+                None = new[] { ComponentType.ReadOnly<Deleted>() },
+            });
 
             m_StepRequests = StepRequests;
             m_StepAllowance = StepAllowance;
@@ -105,6 +111,7 @@ namespace RealisticRoadWorks.V3.Director
             m_StepGc = StepGc;
             m_StepTrims = StepTrims;
             m_StepPreview = AdoptPreviewHidden;
+            m_StepUpgrade = StepUpgrade;
 
             DirectorIntrospection.Register();
             RRWLog.Info("director: created (Modification1 before GenerateAreasSystem, order " + RRWOrder.Director + ")");
@@ -146,6 +153,8 @@ namespace RealisticRoadWorks.V3.Director
             m_GuardGc.Reset();
             m_GuardTrims.Reset();
             m_GuardPreview.Reset();
+            m_GuardUpgrade.Reset();
+            m_UwRelink = false;
         }
 
         private static bool IsGameMode()
@@ -204,6 +213,7 @@ namespace RealisticRoadWorks.V3.Director
             RefreshRecordList();
             SnapshotProjects();
             Run(m_GuardTrims, m_StepTrims);                             // trims and shared nodes
+            Run(m_GuardUpgrade, m_StepUpgrade);                         // upgrade works: runtime from the saved tails
 
             for (int i = 0; i < m_Projects.Count; i++) Accrue(m_Projects[i]);   // accrual, demolition gate, project phase
             Run(m_GuardAllowance, m_StepAllowance);                     // machine allowance (needs this frame's fronts)
@@ -240,6 +250,7 @@ namespace RealisticRoadWorks.V3.Director
             }
             SiteRegistry.Loaded = true;
             m_RecordsRevision = int.MinValue;
+            m_UwRelink = true;   // corridor links of upgrade works are runtime only: re-linked from shared chain ends
             RRWLog.Info("director: registry rebuilt: " + n + " edges, " + SiteRegistry.Projects.Count + " projects, next project id " + SiteRegistry.NextProjectId);
         }
 
@@ -280,7 +291,14 @@ namespace RealisticRoadWorks.V3.Director
 
             bool existed = SiteRegistry.TryGetEdge(edge, out var rec) && rec.ProjectId == site.m_ProjectId;
             bool projectExisted = SiteRegistry.Projects.ContainsKey(site.m_ProjectId);
-            if (SiteRegistry.TryGetEdge(edge, out var old) && old.ProjectId != site.m_ProjectId) DetachFromProject(old);
+            var carry = RoadZones.None;
+            uint carryFrom = 0;
+            if (SiteRegistry.TryGetEdge(edge, out var old) && old.ProjectId != site.m_ProjectId)
+            {
+                carry = UpgradeHandOverZones(old, site);
+                carryFrom = old.ProjectId;
+                DetachFromProject(old);
+            }
             rec = SiteRegistry.AddEdge(edge, site.m_ProjectId);
             var st = rec.GetOrCreate<DirEdgeState>(ModuleSlot.Director);
             if (!existed)
@@ -303,10 +321,21 @@ namespace RealisticRoadWorks.V3.Director
                 DirectorShared.PreviewAdopted++;
             }
 
+            // Upgrade works: the edge's bands from its saved tail (the project runtime is built in StepUpgrade)
+            bool upgrade = IsUpgradeSite(site);
+            if (upgrade)
+            {
+                if (rec.Upgrade == null) rec.Upgrade = new UpgradeEdgeState();
+                rec.Upgrade.Load(site);
+            }
+            else rec.Upgrade = null;
+
             var proj = SiteRegistry.GetOrAddProject(site.m_ProjectId);
             if (!proj.Edges.Contains(edge)) { proj.Edges.Add(edge); proj.Revision++; }
             var ps = proj.GetOrCreate<DirProjectState>(ModuleSlot.Director);
             ps.SortDirty = true;
+            if (rebuild) ps.UwRebuilt = true;
+            if (carry != RoadZones.None) BeginUpgradeHandOver(proj, ps, edge, carry, carryFrom);
             proj.Kind = site.Kind;
             proj.Seed = site.m_Seed;
             if (site.Mode == VisualMode.FullDig) proj.Mode = VisualMode.FullDig;
@@ -345,8 +374,9 @@ namespace RealisticRoadWorks.V3.Director
             if (rebuild) st.PendingOnce |= RuntimeFlags.NeedsRebuild;
 
             // Replaced roads stay visible for kReplacePreRollUpdates while the gravel cover appears.
-            // Only for a brand-new site still at its start progress: never after a load (no flicker on load).
-            if (!rebuild && !existed && !rec.HiddenApplied && site.Kind == WorksKind.Construction && site.Has(SiteFlags.Replaced)
+            // Only for a brand-new site still at its start progress: never after a load (no flicker on load). Upgrade works are
+            // never hidden, so they have no pre-roll.
+            if (!rebuild && !existed && !rec.HiddenApplied && !upgrade && site.Kind == WorksKind.Construction && site.Has(SiteFlags.Replaced)
                 && site.m_WorkDone <= (uint)math.round(RRWConst.kC1 * site.m_WorkRequired) + 1u)
                 st.PreRollUntil = m_Now + (uint)RRWConst.kReplacePreRollUpdates;
 
@@ -500,7 +530,7 @@ namespace RealisticRoadWorks.V3.Director
             //      they may disagree: all take the max p) + project-wide flags
             uint req = 1;
             float pMax = 0f;
-            bool differ = false, rushed = false, legacyPaused = false, incompatible = false, anyA = false, calledOff = false;
+            bool differ = false, rushed = false, legacyPaused = false, incompatible = false, anyA = false, anyH = false, calledOff = false;
             float U = 0f;
             for (int i = 0; i < m_PS.Count; i++)
             {
@@ -513,6 +543,7 @@ namespace RealisticRoadWorks.V3.Director
                 incompatible |= st.Has(SiteFlags.Incompatible);
                 calledOff |= st.Has(SiteFlags.CalledOff);
                 anyA |= st.Mode == VisualMode.FullDig;
+                anyH |= IsUpgradeSite(st);
                 U = math.max(U, st.m_ChainLength);
             }
             var kind = m_PS[0].Kind;
@@ -525,7 +556,9 @@ namespace RealisticRoadWorks.V3.Director
             }
 
             float p0 = done / (float)req;
-            var phase0 = PhasePlan.PhaseOf(kind, p0, out float _);
+            // upgrade works: the window and the lead band's phase from the saved schedule (UpgradePlan.At)
+            bool upgrade = !anyA && anyH && proj.Upgrade != null;
+            var phase0 = upgrade ? PhaseAt(proj, kind, p0, out float _) : PhasePlan.PhaseOf(kind, p0, out float _);
 
             // ---- A demolition saved while its D0 call-off was releasing the road (SiteFlags.CalledOff)
             //      re-enters the call-off after load: no accrual, the gate opens it once Machines report clear (no puppets
@@ -605,10 +638,26 @@ namespace RealisticRoadWorks.V3.Director
             if (!working) ps.Carry = 0.0;
 
             // ---- stage context, stage switch machine and accrual hold (may clamp `done`)
-            var modeNow = anyA ? VisualMode.FullDig : m_PS[0].Mode;
+            var modeNow = anyA ? VisualMode.FullDig : upgrade ? VisualMode.HalfWidth : m_PS[0].Mode;
+            if (upgrade) proj.Mode = modeNow;
             bool held = false;
-            try { held = StageStep(proj, ps, kind, modeNow, req, p0, ref done); }
-            catch (Exception e) { RRWLog.ErrorOnce("director stage step", e); }
+            if (upgrade)
+            {
+                try { held = StageStepUpgrade(proj, ps, kind, req, p0, ref done); }
+                catch (Exception e)
+                {
+                    RRWLog.ErrorOnce("director upgrade stage step", e);
+                    UpgradeFailClosed(proj);
+                }
+                // the step may have saved a window's primitive or cleared the lane-drop flag in the tails: write back from those
+                for (int i = 0; i < m_PE.Count; i++)
+                    if (em.Exists(m_PE[i]) && em.HasComponent<RoadWorksSite>(m_PE[i])) m_PS[i] = em.GetComponentData<RoadWorksSite>(m_PE[i]);
+            }
+            else
+            {
+                try { held = StageStep(proj, ps, kind, modeNow, req, p0, ref done); }
+                catch (Exception e) { RRWLog.ErrorOnce("director stage step", e); }
+            }
             if (held) ps.Carry = 0.0;
 
             // write back (read-modify-write of every edge's saved site) only when something changed
@@ -630,7 +679,8 @@ namespace RealisticRoadWorks.V3.Director
             }
 
             float p = done / (float)req;
-            var phase = PhasePlan.PhaseOf(kind, p, out float f);
+            float f;
+            var phase = upgrade ? PhaseAt(proj, kind, p, out f) : PhasePlan.PhaseOf(kind, p, out f);
 
             // ---- ProgressModel (domain: sim frames; anchored at SimFrame where the accrued p is exact)
             float ratePF = working && !held ? rate / req : 0f;   // a held p re-anchors with rate 0 (no ModelReset)
@@ -674,7 +724,7 @@ namespace RealisticRoadWorks.V3.Director
             // ---- project state
             var first = m_PS[0];
             proj.Kind = kind;
-            proj.Mode = anyA ? VisualMode.FullDig : first.Mode;
+            proj.Mode = modeNow;
             proj.ChainLength = U;
             proj.Progress = p;
             proj.Phase = phase;
@@ -706,7 +756,7 @@ namespace RealisticRoadWorks.V3.Director
                     // leave; the road opens once Machines report the carriageway clear (EdgePass, MachinesHoldRoad)
                     if (proj.ReleaseSince == 0) BeginRelease(proj, ps);
                     RRWLog.Info("director: " + kind + " project #" + proj.Id + " complete (" + m_PE.Count + " edges): tearing down, "
-                                + (proj.Mode == VisualMode.FullDig ? "road opens once the machines have left" : "no machines (mode D)"));
+                                + (PhasePlan.HasMachines(proj.Mode) ? "road opens once the machines have left" : "no machines (mode D)"));
                 }
             }
             else
@@ -723,7 +773,7 @@ namespace RealisticRoadWorks.V3.Director
         {
             proj.ReleaseSince = math.max(1u, m_Now);
             proj.ReleaseSimSince = RRWClock.SimFrame;
-            ps.Hold = proj.Mode == VisualMode.FullDig;
+            ps.Hold = PhasePlan.HasMachines(proj.Mode);
             ps.OpenedAfterRelease = false;
             ps.OpenedAt = 0;
             ps.HoldLogged = false;
@@ -745,8 +795,14 @@ namespace RealisticRoadWorks.V3.Director
         private void ProjectGate(ProjectRecord proj, DirProjectState ps)
         {
             var s = m_S;
-            bool hold = PhasePlan.MachinesHoldRoad(proj.Mode, proj.ReleaseSince, proj.MachinesOnCarriageway, proj.MachinesReportUpdate, m_Now, proj.ReleaseCapped(m_Now));
-            if (ps.OpenedAfterRelease) hold = false;                       // sticky: never Open -> Closed -> Open
+            // upgrade works hold only while a machine is in a lane group the release opens (the groups closed now); every other
+            // mode keeps its rule (the zone overload hands them to the carriageway gate)
+            var opening = proj.Mode == VisualMode.HalfWidth ? RoadZones.AllLanes & ~proj.OpenLanes : RoadZones.None;
+            // lane groups taken over from another running upgrade project stay closed while its machines are still in them
+            bool handOver = proj.Mode == VisualMode.HalfWidth && UpgradeHandOverHold(proj, ps);
+            bool hold = PhasePlan.MachinesHoldRoad(proj.Mode, proj.ReleaseSince, proj.MachinesOnCarriageway, proj.MachinesReportUpdate, m_Now, proj.ReleaseCapped(m_Now),
+                                                   proj.MachineZones, opening) || handOver;
+            if (ps.OpenedAfterRelease) hold = handOver;                    // sticky: never Open -> Closed -> Open
             else if (proj.Releasing)
             {
                 uint age = unchecked(m_Now - proj.ReleaseSince);
@@ -754,7 +810,7 @@ namespace RealisticRoadWorks.V3.Director
                 {
                     ps.OpenedAfterRelease = true;
                     ps.OpenedAt = m_Now;
-                    bool capped = proj.Mode == VisualMode.FullDig && proj.ReleaseCapped(m_Now);
+                    bool capped = PhasePlan.HasMachines(proj.Mode) && proj.ReleaseCapped(m_Now);
                     if (capped)
                     {
                         DirectorShared.ReleasesCapped++;
@@ -767,7 +823,7 @@ namespace RealisticRoadWorks.V3.Director
                         }
                     }
                     else DirectorShared.ReleasesOpened++;
-                    if (proj.Mode == VisualMode.FullDig)
+                    if (PhasePlan.HasMachines(proj.Mode))
                         RRWLog.Info("director: project #" + proj.Id + ": machines clear, road opens (" + age + " updates after "
                                     + (ps.CallOff ? "the call-off" : "completion") + (capped ? ", safety cap" : "") + ")");
                     else
@@ -791,6 +847,16 @@ namespace RealisticRoadWorks.V3.Director
                 RRWLog.ErrorOnce("director stage zones", e);
                 proj.OpenLanes &= RoadZones.Sidewalks;
                 proj.WorkZonesReady = RoadZones.None;
+            }
+            // Upgrade works: MachineSafe and the machine-safe range of every band from this update's ready zones
+            if (IsUpgradeProject(proj))
+            {
+                try { UpgradeSafety(proj); }
+                catch (Exception e)
+                {
+                    RRWLog.ErrorOnce("director upgrade machine safety", e);
+                    UpgradeFailClosed(proj);
+                }
             }
             if (proj.OpenLanes != ps.LoggedOpenLanes)
             {
@@ -826,6 +892,11 @@ namespace RealisticRoadWorks.V3.Director
             int hidden = 0;
             ClosureLevel projClosure = ClosureLevel.Open;
             ProjectGate(proj, ps);
+            bool upgrade = IsUpgradeProject(proj);
+            var upgradePrim = UpgradeClosurePrimitive(proj);
+            // upgrade works hold the road only while a lane group that opens is still closed (MachinesHoldRoad), or while lane
+            // groups taken over from another project wait for its machines (UpgradeHandOverHold)
+            bool busy = ps.Hold;
             for (int i = 0; i < proj.Edges.Count; i++)
             {
                 Entity e = proj.Edges[i];
@@ -837,10 +908,11 @@ namespace RealisticRoadWorks.V3.Director
                 var ground = em.HasComponent<RoadWorksGround>(e) ? em.GetComponentData<RoadWorksGround>(e) : RoadWorksGround.Initial;
 
                 float p = site.Progress;
-                var phase = PhasePlan.PhaseOf(site.Kind, p, out float f);
+                float f;
+                var phase = upgrade ? PhaseAt(proj, site.Kind, p, out f) : PhasePlan.PhaseOf(site.Kind, p, out f);
 
-                // ---- HideWanted and Hidden
-                bool wanted = PhasePlan.IsHidden(site.Kind, site.Mode, phase)
+                // ---- HideWanted and Hidden (upgrade works are never hidden)
+                bool wanted = !upgrade && PhasePlan.IsHidden(site.Kind, site.Mode, phase)
                               && s.TerrainOn
                               && RRWDebug.On(DebugLayers.Hide)
                               && !site.Has(SiteFlags.Incompatible)
@@ -854,10 +926,11 @@ namespace RealisticRoadWorks.V3.Director
 
                 // ---- closure target. The PROJECT mode decides (a mode-A project is Closed for the
                 //      whole works, buildings that spawned along it wait; a mode-D edge inside an A chain too), and the
-                //      release gate keeps it Closed until every machine has left the carriageway.
+                //      release gate keeps it Closed until every machine has left the carriageway. Upgrade works (every HalfWidth
+                //      project) follow the layout window's traffic primitive and never the start closure or `dependants`.
                 bool dependants = rec.Dependants || site.Has(SiteFlags.Dependants);
                 var closure = RRWDebug.On(DebugLayers.Closure)
-                    ? PhasePlan.Closure(site.Kind, s.Policy, dependants, phase, proj.Mode, wanted, ps.Hold)
+                    ? PhasePlan.Closure(site.Kind, s.Policy, dependants, phase, proj.Mode, wanted, busy, upgradePrim)
                     : ClosureLevel.Open;
                 if (closure > projClosure) projClosure = closure;
                 // Staged opening: lane groups of a Closed, visible edge that carry traffic anyway (Traffic applies them per lane)
@@ -948,7 +1021,9 @@ namespace RealisticRoadWorks.V3.Director
                 // the front jumps from u = U back to 0 (seen in testing: on an 816 m test road a camera at the chain end went
                 // "allowMachines=False cam=816" in the C2->C3 reveal frame); the nearest-chain distance does not jump.
                 float keep = math.min(d, proj.CameraChainDistance);
-                bool allow = s.MachinesOn && proj.Mode == VisualMode.FullDig && !proj.ClearingTraffic && proj.Phase != WorksPhase.Complete && !proj.Releasing
+                // upgrade works: machines only while a band of the layout window has a machine-safe sub-strip
+                bool allow = s.MachinesOn && PhasePlan.HasMachines(proj.Mode) && (proj.Mode != VisualMode.HalfWidth || UpgradeMachinesWanted(proj))
+                             && !proj.ClearingTraffic && proj.Phase != WorksPhase.Complete && !proj.Releasing
                              && (d < RRWConst.kMachineSpawnRadius || (ps.WasAllowed && keep < RRWConst.kMachineDespawnRadius));
                 bool degraded = false;
                 if (allow)
@@ -1053,7 +1128,8 @@ namespace RealisticRoadWorks.V3.Director
         // Crew count to latch for the current view (dev override, else the Core rule).
         private int CrewCountNow(ProjectRecord proj, DirProjectState ps, in ProjectView view)
         {
-            if (ps.CrewsOverride <= 0) return PhasePlan.CrewCount(view, m_S.CrewsMax);
+            // upgrade works: one crew per band of the layout window (no dev override: the crews stand side by side)
+            if (ps.CrewsOverride <= 0 || view.IsUpgrade) return PhasePlan.CrewCount(view, m_S.CrewsMax);
             if (view.Mode != VisualMode.FullDig || view.Phase == WorksPhase.Complete || view.Phase == WorksPhase.None || !(view.U > 0f)) return 1;
             float L = view.TrimmedLength > 0f ? math.min(view.TrimmedLength, view.U) : view.U;
             int cap = math.max(1, (int)math.floor(L / RRWConst.kMinSectionLength));
@@ -1086,6 +1162,9 @@ namespace RealisticRoadWorks.V3.Director
             }
             if (why == null && ps.CrewsRelatch && phase == WorksPhase.Finishing) why = "C4 switch Vacate -> Swap";
             if (why == null && ps.CrewsOverride != ps.CrewsOverrideApplied) why = "dev SetCrews " + (ps.CrewsOverride > 0 ? ps.CrewsOverride.ToString() : "auto");
+            // upgrade works: one crew per band of the layout window, so a window change re-latches even when the phase stays
+            int upgradeWindow = IsUpgradeProject(proj) ? proj.Upgrade.LayoutWindowAt(proj.Progress) : int.MinValue;
+            if (why == null && upgradeWindow != ps.CrewsWindow) why = "upgrade window " + (ps.CrewsWindow + 1) + " -> " + (upgradeWindow + 1);
             ps.CrewsRelatch = false;
             // rrw.check bookkeeping for "Rollers > 0 while RollersOn has been off for more than one phase"
             bool rollersOn = m_S.RollersOn;
@@ -1106,7 +1185,7 @@ namespace RealisticRoadWorks.V3.Director
             // latch of this phase (SiteFlags bits 12..15) instead of re-deriving it from the current WorkSeconds / rush / setting /
             // swap verdict: the done set is not monotonic in n, so a different count would un-dig terrain and move decals / heaps.
             int n = 0;
-            if ((!ps.CrewsLatched || why == "rebuild visuals") && ps.CrewsOverride <= 0)
+            if ((!ps.CrewsLatched || why == "rebuild visuals") && ps.CrewsOverride <= 0 && upgradeWindow == int.MinValue)
             {
                 int saved = PhasePlan.LatchedCrewsOf(proj.Flags, phase);
                 if (saved > 0)
@@ -1119,8 +1198,12 @@ namespace RealisticRoadWorks.V3.Director
                 }
             }
             if (n <= 0) n = math.clamp(CrewCountNow(proj, ps, view), 1, RRWConst.kMaxCrewsPerProject);
-            try { WriteLatchedCrews(proj, n, phase); }
-            catch (Exception e) { RRWLog.ErrorOnce("director crew latch save", e); }
+            // the upgrade crew count follows from the bands of the window: nothing to save
+            if (upgradeWindow == int.MinValue)
+            {
+                try { WriteLatchedCrews(proj, n, phase); }
+                catch (Exception e) { RRWLog.ErrorOnce("director crew latch save", e); }
+            }
             int before = proj.Crews;
             ps.CrewsLatched = true;
             ps.CrewsPhase = phase;
@@ -1129,6 +1212,7 @@ namespace RealisticRoadWorks.V3.Director
             ps.CrewsOverrideApplied = ps.CrewsOverride;
             ps.CrewsWhy = why;
             ps.CrewsLatchedUpdate = m_Now;
+            ps.CrewsWindow = upgradeWindow;
             DirectorShared.CrewLatches++;
             proj.Crews = n;
             if (proj.FocusCrew >= n) proj.FocusCrew = n - 1;

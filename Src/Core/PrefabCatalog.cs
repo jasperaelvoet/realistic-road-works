@@ -77,10 +77,12 @@ namespace RealisticRoadWorks.V3
             return (na ? "NA_Speedlimit" : "EU_Speedlimit") + pick;
         }
         // RESERVED for later
-        public const string RoadBlockMarker = "Road Block";                 // MarkerObjectPrefab (LaneBlock) -> "RRW Lane Block" clone (Traffic)
-        public const string LaneBlock = "RRW Lane Block";
+        public const string RoadBlockMarker = "Road Block";                 // MarkerObjectPrefab -> "RRW Lane Closure" clone (Traffic, LaneClosure)
+        public const string LaneClosure = "RRW Lane Closure";               // the product's lane blocker clone (RRWOrder.LaneClosureRegistry)
+        public const string LaneBlock = "RRW Lane Block";                   // the lane-drop experiment's clone (kept for it)
         public const string RoadDirt = "RRW Road Dirt";
         public const string MarkingBlackout = "RRW Marking Blackout";
+        public const string OldAsphalt = "RRW Old Asphalt";                 // upgrade works: removed strip before break-up (Terrain only)
         public const string ConeLamp = "RRW Cone Lamp";                     // SafetyCone03 + RRW Amber Light 0.3 lux (optional, experimental switch)
 
         // ---- vanilla surfaces the RRW clones are built from (SurfacePrefab)
@@ -114,6 +116,9 @@ namespace RealisticRoadWorks.V3
                 case SurfaceLayer.BaseCourseCover: return BaseCourseCover;
                 case SurfaceLayer.FreshAsphalt: return FreshAsphalt;
                 case SurfaceLayer.TempMarking: return TempMarking;
+                case SurfaceLayer.MarkingBlackout: return MarkingBlackout;
+                case SurfaceLayer.RoadDirt: return RoadDirt;
+                case SurfaceLayer.OldAsphalt: return OldAsphalt;
                 default: return FreshAsphaltCover;
             }
         }

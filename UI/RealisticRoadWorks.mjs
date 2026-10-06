@@ -6,7 +6,7 @@
  * Version: 3.0.0
  * Dependencies:
  */
-// "Road works" section of the selected-info panel (SPEC 4.8 / 7), built from the game's own panel components
+// "Road works" section of the selected-info panel, built from the game's own panel components
 // (InfoSection, InfoRow, CapacityBar, InfoButton) so it looks and navigates like a vanilla section.
 // Every text arrives ready-made from RealisticRoadWorks.V3.UI.WorksInfoSection (C#); buttons call its triggers.
 // Robustness: missing game components fall back to plain markup, and an error boundary keeps a render error inside
@@ -46,7 +46,7 @@ const C = {
     negative: "var(--negativeColor, #e95f4a)",
 };
 
-// ETA states (C# EtaState; 2 was "paused", removed in round 2) and closures (ClosureLevel; the C# side sends a Closed
+// ETA states (C# EtaState; 2 was "paused", since removed) and closures (ClosureLevel; the C# side sends a Closed
 // road with one side open as CLOSURE_SLOW, so its pip is amber).
 const ETA_WORKING = 0, ETA_CREWS_OFF = 1, ETA_CLEARING = 3, ETA_FINISHING = 4;
 const CLOSURE_OPEN = 0, CLOSURE_SLOW = 1, CLOSURE_CLOSED = 2;
@@ -153,8 +153,9 @@ function Stepper({ steps, index, fraction, working }) {
     return h("div", { style: { display: "flex", flexDirection: "row", alignItems: "flex-start", padding: "8rem 6rem 6rem 6rem" } }, cols);
 }
 
-// Round 4: one small bar per crew section, side by side in chain order, each filled with that crew's own sweep through its
-// section. The crew nearest the camera (the one "Show work front" goes to first) is drawn brighter.
+// One small bar per crew section, side by side in chain order, each filled with that crew's own sweep through its
+// section (upgrade works: one bar per band of the current step, filled with that band's progress). The crew nearest the
+// camera (the one "Show work front" goes to first) is drawn brighter.
 function CrewGauge({ fills, focus }) {
     const segs = [];
     for (let i = 0; i < fills.length; i++) {
@@ -219,18 +220,25 @@ export default function register(registry) {
         rows.push(h(InfoRow, { key: "head", icon: ICON.works, left: props.title, right: (props.kindText || "").toUpperCase(), uppercase: true, disableFocus: true }));
         if (steps.length > 0) rows.push(h(Stepper, { key: "steps", steps: steps, index: props.stepIndex | 0, fraction: props.stepFraction || 0, working: working }));
         rows.push(h(CapacityBar, { key: "bar", progress: progress, max: 100, plain: true }, props.phaseText));
+        // Upgrade works: the bar names the step ("Step 2 of 3"); one line per band of that step follows ("Left side · Paving · 47%").
+        const bandLines = Array.isArray(props.bandLines) ? props.bandLines : [];
+        for (let i = 0; i < bandLines.length; i++)
+            if (bandLines[i]) rows.push(h(InfoRow, { key: "band" + i, left: bandLines[i], subRow: true, disableFocus: true }));
         rows.push(h(InfoRow, { key: "eta", icon: ICON.crew, left: props.etaText, right: etaPip, disableFocus: true }));
         if (props.crewsText) {
             const fills = Array.isArray(props.crewFills) ? props.crewFills : [];
             rows.push(h(InfoRow, { key: "crews", left: props.crewsText, right: fills.length > 1 ? h(CrewGauge, { fills: fills, focus: props.focusCrew | 0 }) : null, subRow: true, disableFocus: true }));
         }
         rows.push(h(InfoRow, { key: "traffic", icon: ICON.traffic, left: props.trafficText, right: trafficPip, disableFocus: true }));
+        // Upgrade works running as a slow zone: why no lane is closed and no machine works in the lanes.
+        if (props.trafficNote)
+            rows.push(h(InfoRow, { key: "trafficNote", left: h("div", { style: { color: C.warning } }, props.trafficNote), subRow: true, disableFocus: true }));
         if (props.paidText) rows.push(h(InfoRow, { key: "money", icon: ICON.money, left: props.paidText, right: props.refundText, subRow: true, disableFocus: true }));
         if (props.segmentsText) rows.push(h(InfoRow, { key: "segments", left: props.segmentsText, subRow: true, disableFocus: true }));
 
         // Actions: a compact 2-column grid (native InfoButtons, labels wrap inside their half) instead of four
         // full-width buttons, so the section fits the info panel without scrolling. Order: Rush | Cancel, Focus
-        // (pause works was removed in round 2); an odd last button spans the full width.
+        // (pause works was removed); an odd last button spans the full width.
         const buttons = [];
         let cantAfford = null;
         if (!complete) {

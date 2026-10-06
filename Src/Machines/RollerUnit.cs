@@ -35,6 +35,18 @@ namespace RealisticRoadWorks.V3.Machines
         public static string Source = "";
 
         public const int kBeaconOff = RRWConst.kRollerBeaconPhases;   // beacon index of "off"
+        // Render queue of every roller material (the beacon phases included): above the raised area surfaces it drives on (the
+        // cover layers and road dirt at 2000 + kRenderQueueRaise, the temporary markings at 2000 + kTempMarkingQueueRaise), which
+        // otherwise draw over the roller and turn it black on a visible road; still in the opaque range without decals (< 2475).
+        // The same for every roller (new roads too): it is an opaque, depth-tested mesh, so drawing it after those surfaces only
+        // lets it cover them where it stands in front of them. The queue raises themselves are RRWConst's (the surfaces' values).
+        public const int kRenderQueue = 2450;
+        private const int kGeometryQueue = 2000, kOpaqueNoDecalEnd = 2475;
+        // Compile-time checks (a negative constant does not convert to uint): the roller queue stays above the raised cover and
+        // dirt layers and the temporary markings, and below the end of the opaque no-decal range, if any of those values change.
+        private const uint kQueueAboveCovers = kRenderQueue - (kGeometryQueue + RRWConst.kRenderQueueRaise) - 1;
+        private const uint kQueueAboveTempLines = kRenderQueue - (kGeometryQueue + RRWConst.kTempMarkingQueueRaise) - 1;
+        private const uint kQueueBelowDecalRange = kOpaqueNoDecalEnd - kRenderQueue - 1;
 
         public static bool Ready => s_Mats != null && s_Mats[0] != null;
 
@@ -63,6 +75,8 @@ namespace RealisticRoadWorks.V3.Machines
             if (m.HasProperty("_EmissiveColor")) m.SetVector("_EmissiveColor", Vector4.zero);
             try { HDMaterial.ValidateMaterial(m); }
             catch (Exception e) { RRWLog.Once("roller-validate", "machines: roller HDMaterial.ValidateMaterial failed: " + e.Message); }
+            // after ValidateMaterial, which resets the queue: drawn after the raised road surfaces under it
+            m.renderQueue = kRenderQueue;
             return m;
         }
 

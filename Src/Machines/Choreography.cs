@@ -67,6 +67,16 @@ namespace RealisticRoadWorks.V3.Machines
         public Game.Prefabs.PrefabSystem Ps; // rig reads (DigArms) for the IK schedule decision
         public bool DetailedDigging;  // RRWSetting.DetailedDiggingOn this update
         public bool RollersOn;        // RRWSetting.RollersOn this update (live gate of every roller spawn)
+        // ---- upgrade works (mode H), set by MachineDirectorSystem.ProjectContext / SetCrew
+        public ProjectView ViewBase;  // the project's view; View is this view with the crew's band phase (mode H band crews)
+        public bool Upgrade;          // a mode H project (ProjectView.IsUpgrade)
+        public bool LateralMetres;    // the crew works a band: slot laterals are metres (CrewPlan.LateralMetres), boxes stay in the
+                                      // band's machine-safe sub-strips (Choreo.UwLatRange)
+        public int UwBand = -1;       // chain band of the crew (CrewPlan.Band; -1 = none / the re-marking crew)
+        internal readonly UwCache Uw = new UwCache();   // machine-safe runs of this update (Choreo.UwRun)
+        // the project-level lane policy (SetLanePolicy) a band crew's policy overrides; restored for the other crews
+        public bool LaneReadyOk, LaneNoSpawn, LaneNarrow, LaneCanTurn;
+        public string LaneNoSpawnWhy = "";
 
         public float FrontAt(double tau) => MachineMotion.Front(Front, Clk, tau);
     }
@@ -129,6 +139,8 @@ namespace RealisticRoadWorks.V3.Machines
 
         public static float LatOf(PlanContext c, float v, float u, Puppet p)
         {
+            // mode H band crews: the slot lateral is metres (chain frame), clamped into the band's machine-safe run
+            if (c.LateralMetres) return ClampLat(c, p, u, v);
             var smp = TrackBuilder.At(c.Track, u);
             float flat = smp.FlatHalf > 0f ? smp.FlatHalf : 4f;
             float hw = smp.HalfWidth > 0f ? smp.HalfWidth : 6f;
@@ -187,6 +199,7 @@ namespace RealisticRoadWorks.V3.Machines
         public static bool LatRange(PlanContext c, Puppet p, float u, out float a, out float b)
         {
             a = float.NegativeInfinity; b = float.PositiveInfinity;
+            if (c.Upgrade && UwLatRange(c, p, u, out bool fit, ref a, ref b)) return fit;
             if (!c.Visible && !c.KeepLeft && !c.KeepRight && !c.KeepParkL && !c.KeepParkR) return true;
             TrackBuilder.CarriageAt(c.Track, u, out float lo, out float hi);
             float hwb = p.BoxHalfWid;
@@ -238,8 +251,21 @@ namespace RealisticRoadWorks.V3.Machines
             return math.clamp(lat, a, b);
         }
 
-        public static float AnchorLo(PlanContext c, Puppet p) => c.Trim0 + 1.5f + RRWConst.kBarrierClearance + EndDeviceExtra(c) + p.BoxHalfLen;
-        public static float AnchorHi(PlanContext c, Puppet p) => c.Trim1 - 1.5f - RRWConst.kBarrierClearance - EndDeviceExtra(c) - p.BoxHalfLen;
+        // Mode H band crews (and their leavers) also stay inside the stretch of the chain where their band is machine-safe
+        // (UwStretch: lane drops end before the nodes).
+        public static float AnchorLo(PlanContext c, Puppet p)
+        {
+            float lo = c.Trim0 + 1.5f + RRWConst.kBarrierClearance + EndDeviceExtra(c) + p.BoxHalfLen;
+            if (c.Upgrade && UwStretchOf(c, p, out float s0, out _)) lo = math.max(lo, s0 + p.BoxHalfLen + math.abs(p.BoxOffZ));
+            return lo;
+        }
+
+        public static float AnchorHi(PlanContext c, Puppet p)
+        {
+            float hi = c.Trim1 - 1.5f - RRWConst.kBarrierClearance - EndDeviceExtra(c) - p.BoxHalfLen;
+            if (c.Upgrade && UwStretchOf(c, p, out _, out float s1)) hi = math.min(hi, s1 - p.BoxHalfLen - math.abs(p.BoxOffZ));
+            return hi;
+        }
 
         // Front-relative anchors of a crew stay in its section (+- kSecSlack); one crew: AnchorLo / AnchorHi.
         public static float CrewLo(PlanContext c, Puppet p) => c.Crews > 1 ? math.max(AnchorLo(c, p), c.SecLo - MxConst.kSecSlack) : AnchorLo(c, p);
@@ -270,7 +296,11 @@ namespace RealisticRoadWorks.V3.Machines
         public static float ClampU(PlanContext c, Puppet p, float u)
         {
             float lo = AnchorLo(c, p), hi = AnchorHi(c, p);
-            if (lo > hi) return 0.5f * (c.Trim0 + c.Trim1);
+            if (lo > hi)
+            {
+                if (c.Upgrade && UwStretchOf(c, p, out float s0, out float s1)) return 0.5f * (s0 + s1);
+                return 0.5f * (c.Trim0 + c.Trim1);
+            }
             return math.clamp(u, lo, hi);
         }
 
@@ -358,6 +388,8 @@ namespace RealisticRoadWorks.V3.Machines
             double end = !double.IsNaN(cutAt) ? cutAt : finishLeg ? NaturalEnd(old, cur, tOld, c) : tOld;
             if (!cur.OpenEnded && end > cur.T1) end = cur.T1;
             if (end < tOld) end = tOld;
+            // a leg moving far faster than the role ever may (a jump an earlier plan carried on) is never run to its end
+            if (end > tOld && RunawayLeg(cur, b.Lim)) end = tOld;
             float shift = (float)(old.Epoch - c.Now);
             for (int i = math.max(0, iPast); i <= iNow; i++)
             {
@@ -394,8 +426,63 @@ namespace RealisticRoadWorks.V3.Machines
                     b.V = (float)((s.U - sa.U) / (tb - ta));
                 }
                 if (math.abs(b.V) < 0.02f) b.V = 0f;
+                // a jump in the old plan is not a speed the new plan may match or brake from
+                b.V = MxSpeed.Carried(p, b.V, b.Lim, "re-plan from leg " + (LegKind)cur.Kind);
             }
             return b;
+        }
+
+        // A leg of an older plan that moves far faster than the role may (MxSpeed.RunawaySpeed): a drive / turn / brake with such a
+        // top speed, or a front-relative leg whose start velocity match is larger than any carried speed minus any target speed
+        // (both within RunawaySpeed) can be.
+        static bool RunawayLeg(in MachineLeg l, in MachineLimits lim)
+        {
+            float cap = MxSpeed.RunawaySpeed(lim);
+            switch ((LegKind)l.Kind)
+            {
+                case LegKind.Drive:
+                case LegKind.Turn:
+                case LegKind.Brake:
+                    return !(l.Vmax <= cap);
+                case LegKind.Follow:
+                case LegKind.Shuttle:
+                case LegKind.Scrape:
+                    return !(math.abs(l.Cv) <= 2f * cap);
+                default:
+                    return false;
+            }
+        }
+
+        // Runaway stop: the plan ends where the puppet is now, standing (the running leg is cut now, an open-ended hold follows).
+        // The front models are kept; the next plan starts from rest there.
+        public static void StopHere(Puppet p, in ClockData clk, double now)
+        {
+            var plan = p.Plan;
+            if (plan.Count <= 0) return;
+            double tOld = now - plan.Epoch;
+            int i = MachineMotion.ActiveLeg(plan, tOld);
+            MachineMotion.State(plan, clk, now, out var s);
+            var cur = plan.Get(i);
+            var hold = new MachineLeg
+            {
+                T0 = (float)math.max(tOld, cur.T0), T1 = float.PositiveInfinity, Kind = (byte)LegKind.Hold, Anim = cur.Anim,
+                Facing = s.Hu >= 0f ? (sbyte)1 : (sbyte)-1, U0 = s.U, L0 = s.Lat, Odo0 = s.Odo, Front = 0,
+            };
+            if (i + 1 < MachinePlan.MaxLegs && tOld > cur.T0)
+            {
+                cur.T1 = (float)tOld;
+                plan.Set(i, cur);
+                plan.Set(i + 1, hold);
+                plan.Count = i + 2;
+            }
+            else
+            {
+                hold.T0 = cur.T0;
+                plan.Set(i, hold);
+                plan.Count = i + 1;
+            }
+            p.Plan = plan;
+            p.PlanDirty = true;
         }
 
         // Bring a moving builder state to rest within the role's acceleration (Brake leg) before a leg that starts
@@ -403,6 +490,7 @@ namespace RealisticRoadWorks.V3.Machines
         public static void Settle(ref LegBuilder b)
         {
             if (math.abs(b.V) < 0.02f) { b.V = 0f; return; }
+            if (MxSpeed.Carried(null, b.V, b.Lim, "settle brake") == 0f) { b.V = 0f; return; }   // never a brake leg from a jump
             float v0 = math.abs(b.V);
             float a = math.max(0.05f, b.Lim.Accel * MxConst.kSettleAccelShare);
             float T = v0 / a, D = 0.5f * v0 * T;
@@ -716,7 +804,9 @@ namespace RealisticRoadWorks.V3.Machines
             const float h = 0.25f;
             float x1 = MachineMotion.FollowU(b.Plan, l, c.Clk, t0, h, hiCut);
             float vT = (x1 - x0) / h;
-            float cv = b.V - vT;
+            // the anchor jumping right at the leg start (a front model step) is not a target speed to match
+            if (!(math.abs(vT) <= MxSpeed.RunawaySpeed(lim))) vT = MxSpeed.Carried(p, vT, lim, "follow target");
+            float cv = MxSpeed.Carried(p, b.V, lim, "velocity match") - vT;
             if (math.abs(cv) < 0.02f) cv = 0f;
             l.Cv = cv;
             l.VDur = cv != 0f ? math.max(0.3f, math.abs(cv) / (MxConst.kVelMatchAccelShare * l.Acc)) : 0f;
@@ -932,6 +1022,9 @@ namespace RealisticRoadWorks.V3.Machines
             if (ik && !(cs.DigSched.Period > 0f)) cs.DigSched = sched;
             float lo = CrewLo(c, p), hi = CrewHi(c, p);
             if (hi < lo) hi = lo;
+            // mode H: the dig anchors never stand in a driveway keep-out on the band's side (before it, then beyond it)
+            int ko = UwDigClamp(c, p, offset, lat, ref lo, ref hi);
+            if (ko >= 0) MxUpgradeStats.DigKeepOutClamps++;
             cs.DigOffset = offset; cs.DigLo = lo; cs.DigHi = hi;
             var b = Begin(p, c);
             float defDur = ik ? sched.HopDefault : MxConst.kHopDur;
@@ -1037,7 +1130,8 @@ namespace RealisticRoadWorks.V3.Machines
             if (l.CatchDur <= 0f) { l.Cu = 0f; l.Cl = 0f; }
             b.T = l.T0;
             b.Add(l);
-            b.Plan.SlewDeg = c.Narrow ? 180f : 90f;
+            // the keyframe cycle's dump slew: beside / behind (180 on narrow sites); mode H band crews dump to the front
+            b.Plan.SlewDeg = c.LateralMetres ? MxConst.kUwPlanSlewDeg : c.Narrow ? 180f : 90f;
             CountOverWork(p, c, c.FrontSpeed);
             Commit(p, ref b, c, double.PositiveInfinity);
         }
@@ -1467,6 +1561,7 @@ namespace RealisticRoadWorks.V3.Machines
 
         public static TruckCfg TruckConfig(PlanContext c, Puppet p, MachineRole role, CrewSlot slot)
         {
+            if (c.LateralMetres) return UwTruckConfig(c, p, role, slot);
             var cfg = new TruckCfg { Load = slot.Load };
             var ph = c.View.Phase;
             bool loadPhase = ph == WorksPhase.Excavation || ph == WorksPhase.BreakUp || ph == WorksPhase.Removal;
@@ -1803,6 +1898,7 @@ namespace RealisticRoadWorks.V3.Machines
                     float slot = PhasePlan.ActiveDumpSlot(v, c.CrewIndex);   // this crew's heap
                     if (float.IsNaN(slot)) slot = F + 6f;
                     stop = slot - cfg.Dir * p.BoxHalfLen;
+                    if (c.LateralMetres) UwShiftOutOfKeepOut(c, p, ref stop, cfg.WorkLat, -cfg.Dir);   // mode H: never tipping in a driveway
                 }
                 else
                 {
@@ -1875,6 +1971,8 @@ namespace RealisticRoadWorks.V3.Machines
                         Lo = st.DigLo + cfg.LoadOffset, Hi = math.max(st.DigLo, st.DigHi) + cfg.LoadOffset,
                         P0 = C, P1 = st.DigHopStart, P2 = st.DigHopDur, Vmax = st.DigVmax, Acc = st.DigAcc,
                     };
+                    // mode H front loading: the truck ahead of the excavator never hops past the end of its band's stretch
+                    if (c.LateralMetres && cfg.LoadOffset > 0f) { l.Hi = math.min(l.Hi, AnchorHi(c, p)); l.Lo = math.min(l.Lo, l.Hi); }
                     if (st.DigRate > 0f && !float.IsNaN(st.DigRateU)) { l.Rate = st.DigRate; l.RateU = st.DigRateU; }   // same slowed front
                     float A0 = DigAnchor(c, st, r.Tk + 0.5 * C) + cfg.LoadOffset;
                     l.Cu = b.U - A0;
@@ -2421,7 +2519,8 @@ namespace RealisticRoadWorks.V3.Machines
             if (lead > 0f) Hold(ref b, b.T + lead, AnimKind.Rest);
             var smp = TrackBuilder.At(c.Track, b.U);
             float hw = smp.HalfWidth > 0f ? smp.HalfWidth : 6f;
-            if (math.abs(b.Lat) - p.BoxHalfWid >= hw)
+            // (mode H band crews leave along their band, on the removed strip beyond the road edge too)
+            if (math.abs(b.Lat) - p.BoxHalfWid >= hw && !(c.Upgrade && p.UwBand >= 0))
             {
                 Hold(ref b, float.PositiveInfinity, AnimKind.Rest);
                 Commit(p, ref b, c, double.PositiveInfinity);
@@ -2523,6 +2622,7 @@ namespace RealisticRoadWorks.V3.Machines
                     if (pass < 2 && past > kLeaveSlotPast) break;
                     if (pass == 2 && past <= kLeaveSlotPast) continue;
                     if (!SlotFree(p, c, uu, lat)) continue;
+                    if (c.Upgrade && p.UwBand >= 0 && pass < 2 && UwInKeepOut(c, p, uu, lat)) continue;   // mode H: not in a driveway
                     if (pass == 0 && InWorkPath(c, p, uu, lat) != null) continue;
                     if (past > 0.01f) MachineDebug.LeaveSlotShifts++;
                     where = "end slot " + k + " u=" + RRWLog.F(uu) + (pass >= 1 && InWorkPath(c, p, uu, lat) != null ? " (in a working path)" : "");
@@ -2765,7 +2865,7 @@ namespace RealisticRoadWorks.V3.Machines
         // include the upper-body overhang): it hugs its floor edge so a truck fits beside it (loading pair test = chassis).
         public static float DiggerLat(PlanContext c, float v, float u, Puppet p)
         {
-            if (c.Visible || math.abs(v) > 0.51f || !p.ExcavatorRig) return LatOf(c, v, u, p);
+            if (c.Visible || c.LateralMetres || math.abs(v) > 0.51f || !p.ExcavatorRig) return LatOf(c, v, u, p);
             var smp = TrackBuilder.At(c.Track, u);
             float flat = smp.FlatHalf > 0f ? smp.FlatHalf : 4f;
             float lim = math.max(0f, flat - p.BoxHalfWid * 0.85f - 0.3f);

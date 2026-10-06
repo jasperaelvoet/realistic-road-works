@@ -69,6 +69,16 @@ namespace RealisticRoadWorks.V3.Machines
 
         static int PassSeed(Puppet p) => (int)(p.Seed % 7u) + p.RollerIndex * 3;
 
+        // Mode H band crews: the pass window stays inside the crew's stretch of the chain (its anchor range).
+        static void UwClampWindow(PlanContext c, Puppet p, ref float lo, ref float hi)
+        {
+            if (!c.LateralMetres) return;
+            float a = AnchorLo(c, p), b = AnchorHi(c, p);
+            if (b < a) return;
+            lo = math.clamp(lo, a, b);
+            hi = math.clamp(hi, a, b);
+        }
+
         // Plans one roller from its slot (Compact: passes; Parked / relay: drive there and stand; anything else: stand still).
         public static void PlanRoller(Puppet p, PlanContext c, in RollerSlot rs)
         {
@@ -101,6 +111,7 @@ namespace RealisticRoadWorks.V3.Machines
             // the window now; the approach drives to its bottom (VFwd) unless the roller already stands inside it
             float lo = rs0.WinLo, hi = rs0.WinHi;
             if (float.IsNaN(lo) || float.IsNaN(hi)) { Hold(ref b, float.PositiveInfinity, AnimKind.Rest); Commit(p, ref b, c, c.Now + 5.0); return; }
+            UwClampWindow(c, p, ref lo, ref hi);
             WindowLatRange(c, p, lo, hi, rs0.WorksHalfOnly, out float latLo, out float latHi);
             int seed = PassSeed(p);
             float lat = PhasePlan.RollerPassLateral(p.PassK + seed, latLo, latHi, RRWConst.kRollerPassShift);
@@ -137,6 +148,7 @@ namespace RealisticRoadWorks.V3.Machines
                     var sl = RollerSlotAt(c, crew, idx, tEnd);
                     if (sl.Slot.Activity != MachineActivity.Compact || float.IsNaN(sl.WinLo)) { open = false; break; }
                     lo = sl.WinLo; hi = sl.WinHi;
+                    UwClampWindow(c, p, ref lo, ref hi);
                     end = forward ? hi : lo;
                 }
                 if (!open) { replan = b.Abs(b.T) + 5.0; break; }   // window closed at the leg end: hold, look again soon

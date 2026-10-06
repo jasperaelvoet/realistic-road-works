@@ -161,21 +161,28 @@ namespace RealisticRoadWorks.V3.UI
             W(writer, "title", tx.Title);
             W(writer, "kindText", tx.KindText);
             writer.PropertyName("kind"); writer.Write((int)st.Kind);
-            // The reserved mode H (VisualMode.HalfWidth, only in saves of a newer build) is shown like mode D.
-            writer.PropertyName("minimal"); writer.Write(st.Mode == VisualMode.Minimal || st.Mode == VisualMode.HalfWidth);
+            // Upgrade works bring machines; a HalfWidth site without its upgrade data is shown like mode D.
+            writer.PropertyName("minimal"); writer.Write(st.Mode == VisualMode.Minimal || (st.Mode == VisualMode.HalfWidth && !st.IsUpgrade));
+            writer.PropertyName("upgrade"); writer.Write(st.IsUpgrade);
             writer.PropertyName("steps");
             writer.ArrayBegin(tx.StepCount);
             for (int i = 0; i < tx.StepCount; i++) writer.Write(tx.Steps[i] ?? "");
             writer.ArrayEnd();
             writer.PropertyName("stepIndex"); writer.Write(tx.StepIndex);
-            writer.PropertyName("stepFraction"); writer.Write(st.IsComplete ? 1f : math.saturate(st.F));
+            writer.PropertyName("stepFraction"); writer.Write(tx.StepFraction);
             writer.PropertyName("progress"); writer.Write(math.saturate(st.P) * 100f);
             W(writer, "phaseText", tx.PhaseText);
+            // Upgrade works: one line per band of the current window under the bar (empty otherwise).
+            writer.PropertyName("bandLines");
+            writer.ArrayBegin(tx.BandLineCount);
+            for (int i = 0; i < tx.BandLineCount; i++) writer.Write(tx.BandLines[i] ?? "");
+            writer.ArrayEnd();
             W(writer, "etaText", tx.EtaText);
             writer.PropertyName("etaState"); writer.Write((int)st.Eta);
             writer.PropertyName("working"); writer.Write(st.Eta == EtaState.Working);
             W(writer, "trafficText", tx.TrafficText);
             writer.PropertyName("closure"); writer.Write((int)st.DisplayClosure);   // pip level (one side open = amber)
+            W(writer, "trafficNote", tx.TrafficNote);
             W(writer, "paidText", tx.PaidText);
             W(writer, "refundText", tx.RefundText);
             writer.PropertyName("rushCost"); writer.Write((int)math.min(st.RushCost, int.MaxValue));
@@ -185,8 +192,9 @@ namespace RealisticRoadWorks.V3.UI
             writer.PropertyName("canAfford"); writer.Write(st.CanAfford);
             W(writer, "cantAffordText", tx.CantAffordText);
             writer.PropertyName("canCancel"); writer.Write(st.CanCancel);
-            // A cancelled construction being restored cannot be called off: no button at all (not a greyed-out one).
-            writer.PropertyName("showCancel"); writer.Write(!(st.Kind == WorksKind.Demolition && st.CancelledBuild));
+            // A cancelled construction being restored cannot be called off, and upgrade works are never cancelled (the bulldozer
+            // ends them): no button at all (not a greyed-out one).
+            writer.PropertyName("showCancel"); writer.Write(!(st.Kind == WorksKind.Demolition && st.CancelledBuild) && !st.ModeH);
             W(writer, "cancelText", tx.CancelText);
             W(writer, "confirmText", tx.ConfirmText);
             W(writer, "focusText", tx.FocusText);
@@ -260,6 +268,7 @@ namespace RealisticRoadWorks.V3.UI
             {
                 if (!ResolveForTrigger(2)) return;
                 var st = m_TriggerState;
+                if (st.ModeH) { RRWLog.Verbose("ui cancel refused: upgrade works p" + st.ProjectId + " are not cancelled"); return; }
                 if (!st.CanCancel) return;
                 Enqueue(st.Kind == WorksKind.Construction && st.InstantCancel ? WorksRequestType.CancelInstant : WorksRequestType.Cancel, st);
                 AfterTrigger();

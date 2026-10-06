@@ -128,6 +128,8 @@ namespace RealisticRoadWorks.V3.Machines
         public float MaxV, MaxA, LastV, LastA, LastVLimit, LastALimit;
         public int ViolV, ViolA;
         public byte MonLeg;
+        public int RunawaySamples;              // consecutive monitor samples above the runaway speed (MxConst.kRunawayFactor)
+        public bool RunawayLogged;              // its runaway stop / speed clamp was logged (once per puppet)
 
         // ---- Road roller units. A roller is a Puppet with IsRoller set and E == Entity.Null: the plan, legs,
         // sample cache, report, guard, stuck detection, budget, LOD and leave logic are shared; every ECS read / write is skipped and
@@ -186,6 +188,11 @@ namespace RealisticRoadWorks.V3.Machines
         public double ConvoyDepart = double.NaN;// ... or: machine time it departs at full speed so it arrives right after that leader
         public int HeadOnSwitches;
         public double NextHeadOnTau = double.NegativeInfinity;
+        // ---- upgrade works (mode H)
+        public bool Upgrade;                    // a puppet of a mode H project: its machine report adds the verge bits (RoadZoneMath.OfBand)
+        public int UwBand = -1;                 // chain band its crew works (its boxes stay in that band's machine-safe run; -1 = none)
+        public bool UwDropStretch;              // it worked while its band dropped lanes: it keeps the lane-drop stretch (clear of the approach
+                                                // zones at the nodes) until it is gone, whatever the window's primitive becomes (Choreo.UwStretchOf)
 
         public bool IsTruck => Kind == MachineKind.Truck;
         // The MiningExcavator01 clone rig (root scale 0.4, no sub-objects): the digger and the grader.
@@ -295,6 +302,11 @@ namespace RealisticRoadWorks.V3.Machines
             DigRate = 0f;
             DigRateU = float.NaN;
         }
+
+        // ---- upgrade works (mode H): the chain band this crew worked in the last update (a new band = a new window: its
+        // puppets leave along their old band, the crew starts again at the new band's gate)
+        public int UwBand = -1;
+        public int UwBandKey;                 // ... and that band's identity (kind, side, laterals, window: a re-upgrade may renumber the bands)
     }
 
     // Per-project machine state (ProjectRecord slot ModuleSlot.Machines).

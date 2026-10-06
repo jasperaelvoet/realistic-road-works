@@ -187,6 +187,87 @@ namespace RealisticRoadWorks.V3.Persistence
         }
     }
 
+    // Upgrade tails (mode H) of the sites at one moment: what a save writes, or what a load read. Hash = the sum of
+    // RoadWorksSite.TailHash over every tail that is written (or was read) - bands, windows and flags, keyed by project and chain
+    // position, progress excluded - so a reload of the last save shows the same hash. A running project changes it on purpose
+    // (a window start stamps its primitive, a cleared AllAtOnce bit), so only a save and the load of that save compare.
+    internal struct TailCensus
+    {
+        public bool Taken;
+        public int Upgrade, Reconstruction;   // tails written / read, by plan kind
+        public int Invalid;                   // save: tails that fail validation (written, dropped on load); load: tails dropped
+        public int HalfNoPlan;                // save: mode 2 constructions without a plan (written as finished); load: such sites read
+        public int HalfOther;                 // mode 2 sites that are not constructions (a cancelled mode H site; reload as mode D)
+        public uint Hash;
+        public string When;
+
+        public int Tails => Upgrade + Reconstruction;
+
+        public string Text() =>
+            "tails=" + Tails + "(upgrade " + Upgrade + " reconstruction " + Reconstruction + ") hash=" + Hash.ToString("X8")
+            + " invalid=" + Invalid + " mode2NoPlan=" + HalfNoPlan + " mode2NotConstruction=" + HalfOther;
+    }
+
+    internal static class UpgradeTails
+    {
+        // Process-wide, never reset on load: the census of the last save is compared with the next load.
+        public static TailCensus LastSave, Load;
+        public static readonly List<Entity> LoadBadTails = new List<Entity>(8);   // edges whose tail the last load dropped (max 8)
+
+        // atLoad: the sites were just read (invalid / no-plan counts come from RoadWorksSite.m_LoadNote); otherwise the census of
+        // what a save writes now. invalidOut / noPlanOut (optional, at most 8 each) receive the edges of those cases.
+        public static TailCensus Take(EntityQuery sites, bool atLoad, List<Entity> invalidOut = null, List<Entity> noPlanOut = null)
+        {
+            var c = new TailCensus { Taken = true, When = "update " + RRWClock.UpdateIndex + " sim " + RRWClock.SimFrame };
+            invalidOut?.Clear();
+            noPlanOut?.Clear();
+            if (sites.IsEmptyIgnoreFilter) return c;
+            var ents = sites.ToEntityArray(Allocator.Temp);
+            var arr = sites.ToComponentDataArray<RoadWorksSite>(Allocator.Temp);
+            try
+            {
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    var s = arr[i];
+                    bool half = s.Mode == VisualMode.HalfWidth;
+                    if (half && s.Kind != WorksKind.Construction) c.HalfOther++;
+                    bool invalid, noPlan;
+                    if (atLoad)
+                    {
+                        invalid = s.m_LoadNote == RoadWorksSite.kNoteBadTail;
+                        noPlan = s.m_LoadNote == RoadWorksSite.kNoteHalfWidthNoPlan;
+                    }
+                    else
+                    {
+                        invalid = s.WritesTail && !s.TailValid();
+                        noPlan = s.WritesFinished && s.Plan == PlanKind.None;
+                    }
+                    if (invalid) { c.Invalid++; if (invalidOut != null && invalidOut.Count < 8) invalidOut.Add(ents[i]); }
+                    if (noPlan) { c.HalfNoPlan++; if (noPlanOut != null && noPlanOut.Count < 8) noPlanOut.Add(ents[i]); }
+                    // a load keeps only valid tails; a save writes the tail of every mode 2 construction with a plan kind
+                    bool kept = atLoad ? s.Plan != PlanKind.None : s.WritesTail && s.TailValid();
+                    if (!kept) continue;
+                    if (s.Plan == PlanKind.Upgrade) c.Upgrade++; else c.Reconstruction++;
+                    unchecked { c.Hash += s.TailHash(); }
+                }
+            }
+            finally
+            {
+                ents.Dispose();
+                arr.Dispose();
+            }
+            return c;
+        }
+
+        // "same" / "DIFFERENT" when the last save of this session is known, else "".
+        public static string CompareWithLastSave(in TailCensus now)
+        {
+            if (!LastSave.Taken) return "";
+            bool same = LastSave.Tails == now.Tails && LastSave.Hash == now.Hash;
+            return same ? "same as the last save" : "DIFFERENT from the last save (" + LastSave.Text() + "; another city, or the tails changed)";
+        }
+    }
+
     // Entities SaveSanitize temporarily marked Temp; SaveRestore (or the Mod1 watchdog) removes Temp again.
     internal static class SaveGuard
     {

@@ -34,9 +34,11 @@ namespace RealisticRoadWorks.V3.Props
 
         // ------------------------------------------------------------------ building access points (driveway gaps)
 
-        // Driveway gaps exist only on a fenced side whose car half is CLOSED-B (cars cross the works strip there).
+        // Driveway gaps exist only on a fenced side whose car half is CLOSED-B (cars cross the works strip there). Upgrade works
+        // also need them for the band fences (gaps at every access) and the band heaps (keep-outs).
         private static bool NeedsAccess(ProjectProps pp, in PropPlan plan)
         {
+            if (plan.Upgrade && (plan.BandMask != 0 || plan.WaitingMask != 0)) return true;
             if (plan.Fence != FenceStyle.Kerbs) return false;
             RoadZones halves = RoadZoneMath.HalfOfSide(plan.FenceSides);
             for (int i = 0; i < pp.Chain.Count; i++)
@@ -67,8 +69,8 @@ namespace RealisticRoadWorks.V3.Props
             uint before = pp.AccessKey;
             CollectAccess(pp);
             if (pp.AccessKey != before)
-                RRWLog.Info("props: project #" + p.Id + " building access points " + pp.Access.Count + " (driveway gaps while CLOSED-B: " +
-                            RoadZoneMath.Describe(RoadZones.None | AppliedClosedB(pp)) + ")");
+                RRWLog.Info("props: project #" + p.Id + " building access points " + pp.Access.Count + (plan.Upgrade ? " (gaps in the band fences, heap keep-outs)" :
+                            " (driveway gaps while CLOSED-B: " + RoadZoneMath.Describe(RoadZones.None | AppliedClosedB(pp)) + ")"));
         }
 
         private static RoadZones AppliedClosedB(ProjectProps pp)
@@ -147,26 +149,36 @@ namespace RealisticRoadWorks.V3.Props
             for (int i = 0; i < list.Count; i++) Apply(p, pp, list[i]);
         }
 
-        // A world point on the fence line of a chain side at chain u (curve Y). False when u lies on no project edge.
-        private bool FencePoint(ProjectProps pp, float u, int side, out float3 pos, out ChainEdge ce, out float latChain)
+        // Chain lateral of a fence line on an edge: the staged kerb fence of a chain side (line == null), or a band fence line given
+        // per chain edge (ChainEdge.Index; NaN = no fence on that edge).
+        private static float LineLat(ChainEdge ce, int side, float[] line)
+        {
+            if (line == null) return PropLayout.FenceLat(ce.Record.Section, ce.DirSign < 0f, side, RRWGates.FenceLateral, out bool _);
+            return ce.Index >= 0 && ce.Index < line.Length ? line[ce.Index] : float.NaN;
+        }
+
+        // A world point on the fence line of a chain side at chain u (curve Y). False when u lies on no project edge (or on an edge
+        // without that band line).
+        private bool FencePoint(ProjectProps pp, float u, int side, out float3 pos, out ChainEdge ce, out float latChain, float[] line = null)
         {
             pos = default;
             latChain = 0f;
             ce = PropLayout.Locate(pp.Chain, u, out float s, out float gap);
             if (ce == null || ce.Record.Arc == null || gap > PropLayout.kCoverTolerance) return false;
-            latChain = PropLayout.FenceLat(ce.Record.Section, ce.DirSign < 0f, side, RRWGates.FenceLateral, out bool _);
+            latChain = LineLat(ce, side, line);
+            if (float.IsNaN(latChain)) return false;
             pos = ce.Record.Arc.Offset(s, PropLayout.EdgeLateral(ce, latChain));
             return true;
         }
 
         // Chain u' > u whose fence point lies `len` (XZ chord) from the fence point at u.
-        private float ChordStep(ProjectProps pp, float u, float len, int side)
+        private float ChordStep(ProjectProps pp, float u, float len, int side, float[] line = null)
         {
             float uN = u + len;
-            if (!FencePoint(pp, u, side, out float3 a, out _, out _)) return uN;
+            if (!FencePoint(pp, u, side, out float3 a, out _, out _, line)) return uN;
             for (int k = 0; k < 6; k++)
             {
-                if (!FencePoint(pp, uN, side, out float3 b, out _, out _)) break;
+                if (!FencePoint(pp, uN, side, out float3 b, out _, out _, line)) break;
                 float d = math.distance(a.xz, b.xz);
                 if (d < 1e-3f) break;
                 float nu = u + (uN - u) * len / d;
@@ -178,14 +190,16 @@ namespace RealisticRoadWorks.V3.Props
         }
 
         // Curve radius at the fence line is below kFenceShortRadius (inner side: R - lateral).
-        private bool TightAt(ProjectProps pp, float u, int side)
+        private bool TightAt(ProjectProps pp, float u, int side, float[] line = null)
         {
             var ce = PropLayout.Locate(pp.Chain, u, out float s, out float gap);
             if (ce == null || ce.Record.Arc == null) return false;
             var arc = ce.Record.Arc;
             float r = arc.SignedRadius(math.clamp(s, 0f, arc.Length));
             if (float.IsInfinity(r) || float.IsNaN(r)) return false;
-            float latEdge = PropLayout.EdgeLateral(ce, PropLayout.FenceLat(ce.Record.Section, ce.DirSign < 0f, side, RRWGates.FenceLateral, out bool _));
+            float lc = LineLat(ce, side, line);
+            if (float.IsNaN(lc)) return false;
+            float latEdge = PropLayout.EdgeLateral(ce, lc);
             float eff = math.abs(r) - math.sign(r) * latEdge;   // r > 0 turns right: the right side (lat > 0) is the inner side
             return eff < RRWConst.kFenceShortRadius;
         }
@@ -262,28 +276,32 @@ namespace RealisticRoadWorks.V3.Props
         // One fence run [r0, r1] of a side. Pass 1 chooses the panel types (4 m; Short on R < kFenceShortRadius or |dY| >
         // kFenceStepMaxDY; one Short in a remainder >= kFenceShortMin); pass 2 spreads the rest over the joints (stretch <=
         // kFencePitchStretchMax, overlap <= kFenceOverlapMax) and places each panel on its chord, centred, pivot-corrected.
+        // line / panelKind / coneKind: a band fence line (PropUpgrade.cs) with its own keys; default: the staged kerb fence.
         private void LayRun(ProjectRecord p, ProjectProps pp, List<Want> list, int side, int ri, float r0, float r1,
-                            Entity[] main, Entity[] shortF, float L, float Ls, bool haveShort, YMode ym)
+                            Entity[] main, Entity[] shortF, float L, float Ls, bool haveShort, YMode ym,
+                            float[] line = null, PropKind panelKind = PropKind.Fence, int panelSub = -1, PropKind coneKind = PropKind.FenceCone, int coneSub = -1)
         {
+            if (panelSub < 0) panelSub = 4 + side;
+            if (coneSub < 0) coneSub = side;
             m_PanelTypes.Clear();
             float u = r0;
             for (int guard = 0; guard < 1024 && m_PanelTypes.Count < PropLayout.kMaxFencePanelsPerRun; guard++)
             {
-                bool sh = haveShort && TightAt(pp, u, side);
-                float uN = ChordStep(pp, u, sh ? Ls : L, side);
+                bool sh = haveShort && TightAt(pp, u, side, line);
+                float uN = ChordStep(pp, u, sh ? Ls : L, side, line);
                 if (uN > r1 + 1e-3f) break;
-                if (!sh && haveShort && FencePoint(pp, u, side, out float3 pa, out _, out _) && FencePoint(pp, uN, side, out float3 pb, out _, out _)
+                if (!sh && haveShort && FencePoint(pp, u, side, out float3 pa, out _, out _, line) && FencePoint(pp, uN, side, out float3 pb, out _, out _, line)
                     && math.abs(pb.y - pa.y) > RRWConst.kFenceStepMaxDY)
                 {
                     sh = true;
-                    uN = ChordStep(pp, u, Ls, side);
+                    uN = ChordStep(pp, u, Ls, side, line);
                     if (uN > r1 + 1e-3f) break;
                 }
                 m_PanelTypes.Add(sh ? (byte)1 : (byte)0);
                 u = uN;
             }
             float rest = 0f;
-            if (FencePoint(pp, u, side, out float3 ru, out _, out _) && FencePoint(pp, r1, side, out float3 re, out _, out _))
+            if (FencePoint(pp, u, side, out float3 ru, out _, out _, line) && FencePoint(pp, r1, side, out float3 re, out _, out _, line))
                 rest = math.distance(ru.xz, re.xz);
             if (haveShort && rest >= PropLayout.kFenceShortMin && m_PanelTypes.Count < PropLayout.kMaxFencePanelsPerRun)
             {
@@ -300,8 +318,8 @@ namespace RealisticRoadWorks.V3.Props
             {
                 bool sh = m_PanelTypes[i] == 1;
                 float len = sh ? Ls : L;
-                float uN = ChordStep(pp, u, len + delta, side);
-                if (!FencePoint(pp, u, side, out float3 A, out var ce, out float latA) || !FencePoint(pp, uN, side, out float3 B, out _, out float latB))
+                float uN = ChordStep(pp, u, len + delta, side, line);
+                if (!FencePoint(pp, u, side, out float3 A, out var ce, out float latA, line) || !FencePoint(pp, uN, side, out float3 B, out _, out float latB, line))
                 {
                     u = uN;
                     continue;
@@ -312,8 +330,8 @@ namespace RealisticRoadWorks.V3.Props
                 Entity prefab = sh ? Pick(shortF, i + side) : Pick(main, i + side);
                 list.Add(new Want
                 {
-                    Key = PropKeys.Make(PropKind.Fence, 4 + side, (ri << 8) | i),
-                    Kind = PropKind.Fence,
+                    Key = PropKeys.Make(panelKind, panelSub, (ri << 8) | i),
+                    Kind = panelKind,
                     U = (u + uN) * 0.5f,
                     Lateral = (latA + latB) * 0.5f,
                     LatChain = true,
@@ -342,11 +360,12 @@ namespace RealisticRoadWorks.V3.Props
                 float uc = e == 0 ? r0 - PropLayout.kFenceConeOffset : r1 + PropLayout.kFenceConeOffset;
                 var ce = PropLayout.Locate(pp.Chain, uc, out float _, out float gap);
                 if (ce == null || gap > PropLayout.kCoverTolerance) continue;
-                float lat = PropLayout.FenceLat(ce.Record.Section, ce.DirSign < 0f, side, RRWGates.FenceLateral, out bool _);
+                float lat = LineLat(ce, side, line);
+                if (float.IsNaN(lat)) continue;
                 list.Add(new Want
                 {
-                    Key = PropKeys.Make(PropKind.FenceCone, side, ri * 2 + e),
-                    Kind = PropKind.FenceCone,
+                    Key = PropKeys.Make(coneKind, coneSub, ri * 2 + e),
+                    Kind = coneKind,
                     U = uc,
                     Lateral = lat,
                     LatChain = true,

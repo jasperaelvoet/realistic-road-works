@@ -576,14 +576,26 @@ namespace RealisticRoadWorks.V3.Machines
     public static class DigArms
     {
         private static readonly Dictionary<Entity, DigArm> s_Arms = new Dictionary<Entity, DigArm>();
+        private static readonly Dictionary<Entity, DigArm> s_Other = new Dictionary<Entity, DigArm>();   // a second root scale
         public static readonly Dictionary<Entity, string> Why = new Dictionary<Entity, string>();
 
-        public static void Clear() { s_Arms.Clear(); Why.Clear(); }
+        public static void Clear() { s_Arms.Clear(); s_Other.Clear(); Why.Clear(); }
 
         public static DigArm Get(EntityManager em, PrefabSystem ps, Entity prefab, float scale)
         {
             if (prefab == Entity.Null || ps == null) return null;
-            if (s_Arms.TryGetValue(prefab, out var arm)) return arm;
+            if (s_Arms.TryGetValue(prefab, out var arm))
+            {
+                if (arm == null || math.abs(arm.Scale - scale) < 1e-3f) return arm;
+                // the same rig at another root scale (the mode H mini excavator): its own arm model
+                if (s_Other.TryGetValue(prefab, out var other) && other != null && math.abs(other.Scale - scale) < 1e-3f) return other;
+                try { other = DigArm.Build(arm.Rs, scale, out _); }
+                catch (Exception e) { other = null; RRWLog.ErrorOnce("machines ik rig scale", e); }
+                if (other != null && (math.abs(MxConst.kDigTipStickFactor - 0.5f) > 1e-4f || math.abs(MxConst.kDigTipDeg) > 1e-4f))
+                    other.SetTip(MxConst.kDigTipStickFactor * other.L2, MxConst.kDigTipDeg);
+                s_Other[prefab] = other;
+                return other;
+            }
             string why = null;
             try
             {

@@ -99,13 +99,19 @@ namespace RealisticRoadWorks.V3.Persistence
 
 #if DEVTOOLS
         internal static EntityQuery R5AuditQuery;   // shared with the checker / rrw.save.scan (same World)
+#endif
 
         protected override void OnGameLoadingComplete(Colossal.Serialization.Entities.Purpose purpose, GameMode mode)
         {
             base.OnGameLoadingComplete(purpose, mode);
+            // The upgrade tails exactly as the reader left them, before any system updates the sites (a window start stamps its
+            // primitive, a cleared AllAtOnce bit): compared with the last save of this session in the load snapshot.
+            try { UpgradeTails.Load = UpgradeTails.Take(m_Sites, true, UpgradeTails.LoadBadTails); }
+            catch (Exception e) { RRWLog.ErrorOnce("persistence load tail census", e); }
+#if DEVTOOLS
             R5Audit.OnLoaded(EntityManager, m_R5Derived, purpose, mode);
-        }
 #endif
+        }
 
         protected override void OnGamePreload(Colossal.Serialization.Entities.Purpose purpose, GameMode mode)
         {
@@ -118,6 +124,8 @@ namespace RealisticRoadWorks.V3.Persistence
             m_PausedCheckLeft = kPausedCheckUpdates;
             m_PausedFirstCount = -1;
             LaneScan.ResetForLoad();
+            UpgradeTails.Load = default;
+            UpgradeTails.LoadBadTails.Clear();
             m_LoadScanPending = true;
             m_LoadScanWait = 0;
         }
@@ -135,6 +143,7 @@ namespace RealisticRoadWorks.V3.Persistence
                 catch (Exception e) { RRWLog.ErrorOnce("persistence save watchdog", e); SaveGuard.Pending.Clear(); }
             }
 
+            if (RRWGates.UpgradeVisualDrop) LaneScan.VisualDropEverOn = true;   // Forbidden on drop lanes is ours from now on
             if (m_LoadScanPending) LoadScan();
 #if DEVTOOLS
             try { R5Audit.Tick(EntityManager, m_R5Derived); }

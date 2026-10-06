@@ -3,6 +3,37 @@
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [3.1.0] - 2026-10-07
+
+### Added
+
+- **Road upgrades build only what changes.** Replacing a road with another type (for example Small Road to Medium Road) or using
+  an upgrade that moves a kerb no longer rebuilds the whole road or skips the works:
+  - widening digs, grades and paves only the new strip;
+  - narrowing breaks out only the strip beyond the new edge and restores the ground;
+  - a change of lanes or markings re-marks the road one direction at a time.
+- **Lane by lane.** Traffic keeps running in both directions next to the works on yellow temporary construction markings
+  (centre line, lane lines and an edge line along the works). Only the lanes being built are closed, with invisible lane
+  closures; each direction keeps at least one lane, using the old pavement where needed.
+- Machines (excavator or mini excavator, trucks, grader, paver, rollers, painter) work only inside the closed strip, never in a lane
+  that carries traffic.
+- Streets with houses keep every lane, parking spot and driveway open: slow zone with a covered work strip and yellow markings.
+- New setting **Road upgrades**: Realistic (default), Full rebuild, or Instant. Trees, lights and other decorations stay instant.
+- The works panel shows the upgrade kind, a step per work window, progress per side and the traffic arrangement. Upgrade works
+  cannot be cancelled (bulldozing the road ends them and demolishes it normally); Rush still works.
+- Placement tooltip with the expected hours and traffic arrangement while replacing a road.
+
+### Changed
+
+- Save format v2 (backward compatible): saves from 3.0.0 load unchanged, and removing the mod still leaves a clean city.
+- Yellow temporary lines are wider and more visible.
+
+### Fixed
+
+- Rollers no longer turn black under fresh-asphalt covers on a visible road.
+
+[3.1.0]: https://github.com/jasperaelvoet/realistic-road-works/releases/tag/v3.1.0
+
 ## [3.0.0] - 2026-10-06
 
 First public release. (Earlier 1.x and 2.x builds were never published; the version number continues their history.)

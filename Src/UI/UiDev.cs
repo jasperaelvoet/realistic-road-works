@@ -80,6 +80,7 @@ namespace RealisticRoadWorks.V3.UI
               .Append(" section~").Append(RRWLog.F(st.SectionLength)).Append("m show=").Append(st.ShowCrews)
               .Append(" text='").Append(tx.CrewsText).Append("' detail='").Append(tx.CrewsDetail).Append("' fills=");
             for (int i = 0; i < st.Crews && i < st.CrewFill.Length; i++) sb.Append(i > 0 ? "," : "").Append(RRWLog.F(st.CrewFill[i]));
+            if (st.ModeH) sb.Append("\n  ").Append(UpgradeLine(st, tx));
             // Rollers are GameObjects, never selectable; a click on one lands on the works corridor (this panel)
             if (SiteRegistry.TryGetProject(st.ProjectId, out var pr))
             {
@@ -90,6 +91,25 @@ namespace RealisticRoadWorks.V3.UI
                   .Append(" digDust=").Append(s != null && s.DigDustOn ? "on" : "off")
                   .Append(" machines=").Append(pr.MachineCount).Append(" (rollers included)");
             }
+            return sb.ToString();
+        }
+
+        // Upgrade works part of the dump: the view the panel used and the texts it built from it.
+        public static string UpgradeLine(WorksPanelState st, PanelTexts tx)
+        {
+            var sb = new StringBuilder();
+            var u = st.View.Upgrade;
+            sb.Append("upgrade view=").Append(st.IsUpgrade ? "yes" : "no").Append(" class=").Append(st.UpClass);
+            if (st.IsUpgrade)
+                sb.Append(" window=").Append(u.Window).Append('/').Append(u.WindowCount).Append(" gw=").Append(RRWLog.F(u.Gw))
+                  .Append(" traffic=").Append(u.Traffic).Append(" reason=").Append(u.Reason)
+                  .Append(" applied=w").Append(u.AppliedWindow).Append('/').Append(u.AppliedTraffic).Append(u.Vacating ? " vacating" : "")
+                  .Append(" bands=").Append(u.BandCount)
+                  .Append(u.AllAtOnce ? " allAtOnce" : "").Append(" remarkHalf=").Append(u.RemarkHalf);
+            sb.Append(" cancel=").Append(st.CanCancel ? "yes" : "no").Append(" refundText='").Append(tx.RefundText).Append("'")
+              .Append(" stepFraction=").Append(RRWLog.F(tx.StepFraction))
+              .Append(" bandLines='").Append(string.Join(" | ", tx.BandLines, 0, tx.BandLineCount)).Append("'")
+              .Append(" note='").Append(tx.TrafficNote).Append("'");
             return sb.ToString();
         }
     }
@@ -216,6 +236,106 @@ namespace RealisticRoadWorks.V3.UI
                 tx.Build(st, s);
                 ctx.Log("rrw ui text crews " + n + ": '" + tx.CrewsText + "' detail='" + tx.CrewsDetail + "'");
             }
+        }
+    }
+
+    // rrw.ui.tip - the last upgrade estimate of the road / upgrade tool tooltip and the last bulldozer hover over upgrade works.
+    public sealed class UiTipCommand : IDevCommand
+    {
+        public string Name => "rrw.ui.tip";
+        public string Help => "rrw.ui.tip - last replace / upgrade tool tooltip estimate (pieces, class, hours, primitive per window, texts) and bulldozer refund";
+
+        public void Run(DevContext ctx, string[] a)
+        {
+            ctx.Log("rrw ui tip upgrade: " + WorksTooltipSystem.LastUpgrade + " | bulldoze: " + WorksTooltipSystem.LastUpgradeBulldoze);
+        }
+    }
+
+    // rrw.ui.uwtexts - the upgrade works panel texts from synthetic views (a one-sided widening with a re-marking step: setup, each
+    // step, teardown, complete; then the traffic row of every primitive), so all texts can be reviewed without a site.
+    public sealed class UiUpgradeTextsCommand : IDevCommand
+    {
+        public string Name => "rrw.ui.uwtexts";
+        public string Help => "rrw.ui.uwtexts - upgrade works panel texts from synthetic views: steps, bar, band lines, traffic row and note per primitive";
+
+        public void Run(DevContext ctx, string[] a)
+        {
+            var s = RRWSettings.Current;
+            var st = new WorksPanelState();
+            var tx = new PanelTexts();
+            void Case(string label, sbyte window, float gw, BandTraffic prim, StageBlockReason reason, StageSwitch sw = StageSwitch.None, bool complete = false,
+                      int appliedWindow = -1, BandTraffic appliedPrim = BandTraffic.Undecided)
+            {
+                st.Clear();
+                st.Kind = WorksKind.Construction;
+                st.Mode = VisualMode.HalfWidth;
+                st.Phase = complete ? WorksPhase.Complete : WorksPhase.Excavation;
+                st.Closure = PhasePlan.Closes(prim) ? ClosureLevel.Closed : ClosureLevel.SlowZone;
+                st.Switch = sw;
+                st.Eta = EtaState.Working;
+                st.IsUpgrade = true;
+                st.UpClass = UpgradeClass.Mixed;
+                st.View = Synthetic(window, gw, prim, reason);
+                if (appliedWindow >= 0) st.View.Upgrade.SetApplied(appliedWindow, appliedPrim, RoadZones.LeftHalf);
+                tx.Build(st, s);
+                ctx.Log("rrw ui uw " + label + ": kind='" + tx.KindText + "' steps='" + string.Join(" | ", tx.Steps, 0, tx.StepCount) + "' step="
+                        + tx.StepIndex + "/" + tx.StepCount + " f=" + RRWLog.F(tx.StepFraction) + " bar='" + tx.PhaseText + "' bands='"
+                        + string.Join(" | ", tx.BandLines, 0, tx.BandLineCount) + "' traffic='" + tx.TrafficText + "' note='" + tx.TrafficNote
+                        + "' cancelButton=" + (st.ModeH ? "hidden" : "shown"));
+            }
+            Case("setup", -1, 0.5f, BandTraffic.Drop, StageBlockReason.None);
+            Case("step 1 at 30%", 0, 0.3f, BandTraffic.Drop, StageBlockReason.None);
+            Case("step 1 at 80%", 0, 0.8f, BandTraffic.Drop, StageBlockReason.None);
+            Case("step 2 at 60%", 1, 0.6f, BandTraffic.Half, StageBlockReason.None);
+            Case("teardown", 2, 0.5f, BandTraffic.Half, StageBlockReason.None);
+            Case("complete", 2, 1f, BandTraffic.Half, StageBlockReason.None, StageSwitch.None, true);
+            Case("one direction", 0, 0.5f, BandTraffic.Half, StageBlockReason.None);
+            Case("carriageway", 0, 0.5f, BandTraffic.Carriageway, StageBlockReason.None);
+            Case("sidewalk", 0, 0.5f, BandTraffic.Sidewalk, StageBlockReason.None);
+            Case("none", 0, 0.5f, BandTraffic.None, StageBlockReason.None);
+            Case("window switch", 1, 0f, BandTraffic.Half, StageBlockReason.None, StageSwitch.Swap);
+            Case("vacating step 1 (slow zone) into step 2", 1, 0f, BandTraffic.Half, StageBlockReason.None, StageSwitch.None, false, 0, BandTraffic.Dressing);
+            Case("slow zone, no reason", 0, 0.5f, BandTraffic.Dressing, StageBlockReason.None);
+            foreach (StageBlockReason r in System.Enum.GetValues(typeof(StageBlockReason)))
+            {
+                if (r == StageBlockReason.None) continue;
+                Case("slow zone (" + r + ")", 0, 0.5f, BandTraffic.Dressing, r);
+            }
+            Case("undecided, waiting", 0, 0.5f, BandTraffic.Undecided, StageBlockReason.Waiting);
+
+            // The replace / upgrade tool tooltip line of every class with each expected primitive, and the full rebuild line.
+            var prims = new[] { BandTraffic.Drop, BandTraffic.Half, BandTraffic.Carriageway, BandTraffic.Dressing, BandTraffic.None };
+            foreach (var cls in new[] { UpgradeClass.Widen, UpgradeClass.Narrow, UpgradeClass.Remark, UpgradeClass.Mixed })
+            {
+                var sb = new StringBuilder("rrw ui uw tip ").Append(cls).Append(':');
+                foreach (var p in prims) sb.Append(' ').Append(p).Append("='").Append(UpgradeTip.TipText(cls, 7.8f, p)).Append('\'');
+                ctx.Log(sb.ToString());
+            }
+            ctx.Log("rrw ui uw tip rebuild: '" + RRWText.Format(RRWText.UpgradeTipHoursFullRebuild, UiFormat.Hours(19f),
+                    RRWText.Get(RRWText.StructuralKey(UpgradeStructural.Elevation))) + "'");
+        }
+
+        // Mixed one-sided widening: window 0 = new strip on the left + kerb move on the right, window 1 = the markings.
+        private static ProjectView Synthetic(sbyte window, float gw, BandTraffic prim, StageBlockReason reason)
+        {
+            var u = new UpgradeView
+            {
+                Class = UpgradeClass.Mixed,
+                Window = window,
+                WindowCount = 2,
+                Gw = gw,
+                Traffic = prim,
+                Reason = reason,
+                BandCount = 3,
+            };
+            u.SetBand(0, new UpgradeBandView { Kind = BandKind.Build, Side = BandSide.Left, Lo = -12f, Hi = -1f, Window = 0 });
+            u.SetBand(1, new UpgradeBandView { Kind = BandKind.Rebuild, Side = BandSide.Right, Lo = 8f, Hi = 9f, Window = 0 });
+            u.SetBand(2, new UpgradeBandView { Kind = BandKind.Remark, Side = BandSide.Both, Lo = -8f, Hi = 8f, Window = 1 });
+            u.SetPrim(0, prim);
+            u.SetPrim(1, prim);
+            var v = ProjectView.Simple(WorksKind.Construction, VisualMode.HalfWidth, WorksPhase.Excavation, 0f, 200f);
+            v.Upgrade = u;
+            return v;
         }
     }
 

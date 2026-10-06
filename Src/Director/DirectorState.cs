@@ -24,6 +24,11 @@ namespace RealisticRoadWorks.V3.Director
         public const float kRateEpsilon = 1e-12f;
         public const float kCancelInstantSlack = 0.005f;   // a CancelInstant above kInstantCancelProgress + this is a normal cancel
         public const float kFocusHysteresis = 20f;         // FocusCrew switches only when another crew front is this much nearer
+        public const int kUwDetourGraceUpdates = 120;      // a started one-way window keeps its closure this long while Traffic re-checks
+                                                           // the detour for a new project revision (then it weakens without one)
+        public const float kUwMinSafeWidth = 0.1f;         // a band's machine-safe range narrower than this counts as none (allowance)
+        public const float kUwHandOverReach = 2f;          // a puppet of the previous project within the road half width + this of a
+                                                           // taken-over edge (between its ends) keeps the carried lane groups closed
     }
 
     // Director slot of an EdgeRecord (ModuleSlot.Director). Main thread only.
@@ -45,6 +50,10 @@ namespace RealisticRoadWorks.V3.Director
         public uint CornerHash;             // EdgeGeometry end corners: a road drawn into a works node moves the trims
         public uint EligKey;                // prefab / Upgraded / Elevation / composition flags: re-run DigEligible on change
         public uint LaneSig;                // EcsUtil.LaneSignature at the last section measurement: a changed lane set re-measures
+        // ---- upgrade works (mode H)
+        public int UwLayoutTried = int.MinValue;  // GeometryRevision the lane layout of the new road was last read for
+        public uint UwKeepOutKey;           // geometry revision, building accesses and chain coordinates of the driveway keep-outs
+        public uint UwChainIndexOk;         // last update UpgradeEdgeState.ChainIndex belonged to the project's runtime (rrw.check)
     }
 
     // Director slot of a ProjectRecord.
@@ -171,6 +180,30 @@ namespace RealisticRoadWorks.V3.Director
         public int ChainSampleCount;
         public object[] ChainSampleArcs = new object[0];
         public int ChainSampleEdges = -1;
+
+        // ---- upgrade works (mode H). Runtime only: after a load the runtime is rebuilt from the saved tails and the window
+        //      switch is re-derived from p (at a window start it re-runs from Vacate, past it from Drain).
+        public uint UwTailKey;                  // hash of the tails (and edges) the UpgradeRuntime was built from (0 = not built)
+        public bool UwRebuilt;                  // registered by a registry rebuild (load): no adoption-time tree clearing
+        public bool UwFresh;                    // adopted as a new project in this session (not after a load)
+        public int UwStartDone = int.MinValue;  // window whose start switch completed (or that started with nothing to switch)
+        public int UwSwapDone = int.MinValue;   // re-marking window whose half swap completed
+        public int UwSwitchWindow = -1;         // window the running switch belongs to
+        public bool UwSwitchIsSwap;             // the running switch is the half swap inside the re-marking window
+        public bool UwSwapOn;                   // StageContext.SwapOn of the re-marking window this update
+        public int UwLoggedWindow = int.MinValue;   // layout window / primitive / reason last logged
+        public BandTraffic UwLoggedPrim = BandTraffic.Undecided;
+        public StageBlockReason UwLoggedReason;
+        public uint UwDetourStaleSince;         // update a started Half window began waiting for a detour verdict of the current revision
+        public uint UwDerivedOk;                // last update the band data (HasCar, chain indices) was current (rrw.check)
+        public int CrewsWindow = int.MinValue;  // layout window the latched crew count belongs to (upgrade works: one crew per band)
+        // Hand-over: lane groups that were closed on edges this project took over from another running upgrade project (a
+        // re-upgrade, an undo, a split; CHAIN frame of this project). They stay closed (and the road Closed) until no machine of
+        // the previous project is left in them, or kCompletionMachineWaitSimFrames after the hand-over.
+        public RoadZones UwCarry;
+        public readonly List<uint> UwCarryFrom = new List<uint>(2);   // the previous project(s)
+        public uint UwCarrySinceSim;            // RRWClock.SimFrame of the (latest) hand-over
+        public uint UwCarrySinceUpdate;         // RRWClock.UpdateIndex of the same moment (machine reports must be newer)
     }
 
     // State shared between the Director (Mod1), PreviewHideSystem (Mod2B) and its catch-up (Mod5); Tools reads PreviewHidden
@@ -203,12 +236,15 @@ namespace RealisticRoadWorks.V3.Director
         public static int VacateCaps, DrainTimeouts, ReadyTimeouts, HoldCaps, ReCloses, ReCloseTimeouts, ChurnHeld;
         // crew latch counters (rrw.director.state / rrw.crews header)
         public static int CrewLatches, CrewChanges, CrewChangesMidPhase, FocusSwitches, AllowanceDegraded;
+        // upgrade works counters (rrw.director.state / rrw.uw.dir header)
+        public static int UpgradesAdopted, UpgradeRebuilds, UpgradeStamps, UpgradeCancelsRefused, UpgradesEnded, UpgradeEdgesLeft, UpgradeMixes;
 
         public static void Reset()
         {
             SwitchesStarted = SwitchesDone = SwitchesAborted = SwitchesSkipped = 0;
             VacateCaps = DrainTimeouts = ReadyTimeouts = HoldCaps = ReCloses = ReCloseTimeouts = ChurnHeld = 0;
             CrewLatches = CrewChanges = CrewChangesMidPhase = FocusSwitches = AllowanceDegraded = CrewLatchesRestored = 0;
+            UpgradesAdopted = UpgradeRebuilds = UpgradeStamps = UpgradeCancelsRefused = UpgradesEnded = UpgradeEdgesLeft = UpgradeMixes = 0;
             HiddenNodes.Clear();
             PreviewHidden.Clear();
             PreviewHiddenNow.Clear();

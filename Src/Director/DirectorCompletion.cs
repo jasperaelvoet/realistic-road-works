@@ -103,8 +103,9 @@ namespace RealisticRoadWorks.V3.Director
             {
                 try { CompletionTreeCheck(proj); }
                 catch (Exception e) { RRWLog.ErrorOnce("director completion tree check", e); }
+                // upgrade works leave the vanilla wear alone (only the new strip is new road)
                 for (int i = 0; i < m_DoneEdges.Count; i++)
-                    if (SiteRegistry.TryGetEdge(m_DoneEdges[i], out var rec)) RemoveSiteKeepEdge(rec, true);
+                    if (SiteRegistry.TryGetEdge(m_DoneEdges[i], out var rec)) RemoveSiteKeepEdge(rec, rec.Upgrade == null);
                 RRWLog.Info("director: construction project #" + proj.Id + " finished: " + m_DoneEdges.Count + " edge(s) open (waited " + waited + " updates)");
             }
             else
@@ -136,6 +137,8 @@ namespace RealisticRoadWorks.V3.Director
             {
                 if (rec.HiddenApplied) return false;            // un-hidden this frame: the reveal hold has not even started
                 if (g.Settled) return true;
+                // upgrade works were never dug or hidden: nothing to wait for unless Ground holds something on the edge
+                if (rec.Upgrade != null) return !g.Known;
                 // Ground never wrote (module absent or faulted): nothing to wait for after a grace period
                 return !g.Known && waited >= DirConst.kGroundUnknownGraceUpdates;
             }

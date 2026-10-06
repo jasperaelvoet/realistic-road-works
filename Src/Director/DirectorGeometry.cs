@@ -170,6 +170,7 @@ namespace RealisticRoadWorks.V3.Director
                 rec.GeometryRevision++;
                 rec.GeometryChangedUpdate = m_Now;
                 if (SiteRegistry.TryGetProject(rec.ProjectId, out var proj)) proj.Revision++;
+                MarkUpgradeReclassify(rec);
                 RRWLog.Verbose("director: edge " + RRWLog.E(e) + " end geometry changed (node edges): trims " + RRWLog.F(rec.Section.TrimStart) + "/" + RRWLog.F(rec.Section.TrimEnd));
             }
             uint ek = EligibilityKey(e);
@@ -210,6 +211,7 @@ namespace RealisticRoadWorks.V3.Director
             rec.GeometryRevision++;
             rec.GeometryChangedUpdate = m_Now;
             if (SiteRegistry.TryGetProject(rec.ProjectId, out var proj)) proj.Revision++;
+            MarkUpgradeReclassify(rec);
             RRWLog.Info("director: edge " + RRWLog.E(e) + " lanes changed: section re-measured " + old.Verdict + " split=" + RRWLog.F(old.DirSplit)
                         + " -> " + sec.Verdict + " split=" + RRWLog.F(sec.DirSplit) + " through=" + sec.ThroughF + ">" + sec.ThroughB + "<"
                         + " carriage=[" + RRWLog.F(sec.CarriageLo) + "," + RRWLog.F(sec.CarriageHi) + "]");
@@ -287,7 +289,16 @@ namespace RealisticRoadWorks.V3.Director
                 proj.Revision++;
                 proj.GetOrCreate<DirProjectState>(ModuleSlot.Director).SortDirty = true;
             }
+            // upgrade works: the sub-strips, keep-outs and lane layout follow the new revision; the primitives are re-picked
+            // (a started window only weakens: its saved primitive is the ceiling)
+            MarkUpgradeReclassify(rec);
             RRWLog.Verbose("director: geometry changed edge " + RRWLog.E(e) + " u=[" + RRWLog.F(site.m_ChainU0) + "," + RRWLog.F(site.m_ChainU1) + "] len=" + RRWLog.F(st.CurveLength));
+        }
+
+        private void MarkUpgradeReclassify(EdgeRecord rec)
+        {
+            if (rec.Upgrade != null && SiteRegistry.TryGetProject(rec.ProjectId, out var proj) && proj.Upgrade != null)
+                proj.Upgrade.ReclassifyUpdate = math.max(1u, m_Now);
         }
 
         private void GrowProject(uint projectId, float shift, float newU)

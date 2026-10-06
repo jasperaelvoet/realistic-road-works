@@ -182,7 +182,7 @@ namespace RealisticRoadWorks.V3.Machines
                 m_Seen.Add(pr.Id);
                 var st = State(pr);
                 bool has = st.Any();
-                bool may = settings.MachinesOn && pr.Mode == VisualMode.FullDig && pr.AllowMachines && !pr.ClearingTraffic && pr.Phase != WorksPhase.Complete && !pr.Releasing;
+                bool may = settings.MachinesOn && ModeHasMachines(pr) && pr.AllowMachines && !pr.ClearingTraffic && pr.Phase != WorksPhase.Complete && !pr.Releasing;
                 has |= HasLeavers(pr.Id);   // leaving puppets plan their drive-out on the project track
                 if (!has && !may) continue;
                 var td = MachineTrackStore.GetOrCreate(pr.Id);
@@ -230,17 +230,21 @@ namespace RealisticRoadWorks.V3.Machines
             catch (Exception e) { RRWLog.ErrorOnce("machines separation guard", e); }
             MxPerf.End(MxT.G_Guard);
 
-            // M) observed motion vs MachineLimits (rrw.mx.check / rrw.check), after the guard
+            // M) observed motion vs MachineLimits (rrw.mx.check / rrw.check), after the guard; a puppet moving far faster than its
+            // role ever may (twice in a row) is stopped before its plan is written (runaway guard)
             MxPerf.Begin(MxT.M_Monitor);
             try
             {
+                m_Runaway.Clear();
                 var all = MachineRegistry.All;
                 for (int i = 0; i < all.Count; i++)
                 {
                     var p = all[i];
                     if (p.SpawnUpdate == RRWClock.UpdateIndex) MxSpeed.Restart(p);
-                    MxSpeed.Observe(p, now);
+                    if (MxSpeed.Observe(p, now)) m_Runaway.Add(p);
                 }
+                foreach (var p in m_Runaway) StopRunaway(em, p, now);
+                m_Runaway.Clear();
             }
             catch (Exception e) { RRWLog.ErrorOnce("machines speed monitor", e); }
             MxPerf.End(MxT.M_Monitor);
@@ -301,6 +305,41 @@ namespace RealisticRoadWorks.V3.Machines
 
             // R) machine report: written last, after every plan, despawn and guard splice of this update
             WriteReport(now);
+        }
+
+        private readonly List<Puppet> m_Runaway = new List<Puppet>(4);
+
+        // Runaway guard: p moved far faster than its role ever may (MxSpeed.RunawaySpeed) - a jump an earlier plan carried on,
+        // never real motion. It stops where it is and plans again from rest: a working role re-plans this update's successor,
+        // a leaver plans its drive-off again (RetryLeavers). One far off its chain is removed instead (a working role spawns
+        // again at its anchor). Counted; logged once per puppet.
+        private void StopRunaway(EntityManager em, Puppet p, double now)
+        {
+            MxSpeed.Runaways++;
+            MachineMotion.State(p.Plan, MachineRegistry.Clock, now, out var s);
+            string what = p + " v=" + RRWLog.F(p.LastV) + " limit=" + RRWLog.F(p.LastVLimit) + " leg=" + (LegKind)s.LegKind + " u=" + RRWLog.F(s.U) +
+                          (p.PostSite ? " leaving" : " act=" + p.Activity);
+            if (MxSpeed.FirstRunaway.Length == 0) MxSpeed.FirstRunaway = what;
+            bool onChain = SiteRegistry.TryGetProject(p.ProjectId, out var pr) && pr != null &&
+                           s.U >= -MxConst.kSecSlack && s.U <= pr.ChainLength + MxConst.kSecSlack;
+            if (!p.RunawayLogged)
+            {
+                p.RunawayLogged = true;
+                RRWLog.Info("machines: runaway stopped: " + what + (onChain ? " (stops here, plans again from rest)" : " (far off its road: removed)"));
+            }
+            if (!onChain || p.Plan.Count <= 0)
+            {
+                Despawn(em, p, "runaway far off its road");
+                return;
+            }
+            Choreo.StopHere(p, MachineRegistry.Clock, now);
+            MxSpeed.Restart(p);
+            if (p.PostSite)
+            {
+                // the drive-off is planned again from here (conflict-scanned); without an exit it stands until it is removed
+                if (!float.IsNaN(p.LeaveEndU)) { p.LeaveContinue = true; p.ReplanAt = now; }
+            }
+            else p.IntentKey = int.MinValue;   // the role plans again in the next update, from rest
         }
 
         private void WriteReport(double now)
@@ -436,7 +475,7 @@ namespace RealisticRoadWorks.V3.Machines
                 var st = State(pr);
                 var view = pr.View();
                 int n = view.CrewCount;
-                bool may = settings.MachinesOn && pr.Mode == VisualMode.FullDig && pr.AllowMachines && !pr.ClearingTraffic && pr.Phase != WorksPhase.Complete && !pr.Releasing;
+                bool may = settings.MachinesOn && ModeHasMachines(pr) && pr.AllowMachines && !pr.ClearingTraffic && pr.Phase != WorksPhase.Complete && !pr.Releasing;
                 for (int i = 0; i < st.Crews.Length; i++)
                 {
                     var cs = st.Crews[i];
@@ -537,7 +576,9 @@ namespace RealisticRoadWorks.V3.Machines
 
         private static FrontRef FrontOf(ProjectRecord pr, int crew, int crews)
         {
-            bool swap = pr.View().SwapActive;
+            var view = pr.View();
+            if (view.IsUpgrade) return UwFrontOf(pr, view, crew);   // mode H: the crew's band front
+            bool swap = view.SwapActive;
             return new FrontRef
             {
                 Model = pr.Model,
@@ -604,7 +645,7 @@ namespace RealisticRoadWorks.V3.Machines
             bool rebuild = (rf & RuntimeFlags.NeedsRebuild) != 0;
             bool phaseChanged = st.Initialised && st.LastPhase != pr.Phase;
             bool workingChanged = st.Initialised && st.LastWorking != pr.Working;
-            bool allowed = settings.MachinesOn && pr.Mode == VisualMode.FullDig && pr.AllowMachines && !pr.ClearingTraffic;
+            bool allowed = settings.MachinesOn && ModeHasMachines(pr) && pr.AllowMachines && !pr.ClearingTraffic;
             int stage = pr.Phase == WorksPhase.Finishing ? c.Stage.Index : 0;
             // a crew re-latch (Director: Revision / ModelReset / C4 Vacate -> Swap) or a C4a -> C4b stage change
             // re-assigns the crews like a phase change
@@ -631,6 +672,15 @@ namespace RealisticRoadWorks.V3.Machines
                 m_Scratch.Clear();
                 for (int i = 0; i < st.Crews.Length; i++) st.Crews[i].ResetGrid();
             }
+            // mode H: a crew whose band changed (window switch) sends its machines off along the old band; a machine whose box is
+            // no longer machine-safe vacates the band
+            if (c.Upgrade && has)
+            {
+                UwCrewBands(em, c, st, now, n);
+                UwVacate(em, c, st, now, n);
+                has = st.Any();
+            }
+            else if (c.Upgrade) UwCrewBands(em, c, st, now, n);
             // hand-over between crew layouts / phases: keep, re-map (crew relay) or leave + spawn at the anchor
             if (!rebuild && has && (phaseChanged || modelReset || crewsChanged || stageChanged))
             {
@@ -741,16 +791,18 @@ namespace RealisticRoadWorks.V3.Machines
                     continue;
                 }
                 bool frontModel = p.Plan.FrontA.Swap != c.Front.Swap || p.Plan.FrontA.Floor != c.Front.Floor ||
-                                  p.Plan.FrontA.Crews != c.Front.Crews || p.Plan.FrontA.Crew != c.Front.Crew;   // crew section changed
-                bool force = force0 || p.PlannedTrackRevision != td.Revision || p.PlannedPhase != pr.Phase || frontModel;
-                int key = IntentKey(role, slot, c);
+                                  p.Plan.FrontA.Crews != c.Front.Crews || p.Plan.FrontA.Crew != c.Front.Crew ||   // crew section changed
+                                  (c.Upgrade && !p.Plan.FrontA.SameUpgradeBand(c.Front));                           // mode H: band phase changed
+                // (the crew's phase: the project phase, for mode H band crews their band's equivalent phase)
+                bool force = force0 || p.PlannedTrackRevision != td.Revision || p.PlannedPhase != c.View.Phase || frontModel;
+                int key = RoleKey(c, p, role, slot);
                 if (key != p.IntentKey) force = true;
                 // dev rrw.mx.perf: which re-plan triggers fire (a trigger that fires every update shows ~1 per live role per frame)
                 MxPerf.CountIf(phaseChanged, MxC.ForcePhase);
                 MxPerf.CountIf(modelReset, MxC.ForceModelReset);
                 MxPerf.CountIf(workingChanged, MxC.ForceWorking);
                 MxPerf.CountIf(p.PlannedTrackRevision != td.Revision, MxC.ForceTrackRev);
-                MxPerf.CountIf(p.PlannedPhase != pr.Phase, MxC.ForcePlannedPhase);
+                MxPerf.CountIf(p.PlannedPhase != c.View.Phase, MxC.ForcePlannedPhase);
                 MxPerf.CountIf(frontModel, MxC.ForceFrontModel);
                 MxPerf.CountIf(key != p.IntentKey, MxC.ForceIntent);
                 if (p.IsTruck) UpdateTruck(p, c, role, slot, now, force);
@@ -823,7 +875,8 @@ namespace RealisticRoadWorks.V3.Machines
                 for (int r = 0; r < nr; r++)
                 {
                     var p = r < roles.Length ? roles[r] : st.Crews[k].Rollers[r - roles.Length];
-                    if (p == null || p.PostSite || p.Plan.FrontA.Phase != (byte)pr.Phase) continue;
+                    // (a mode H band front belongs to its band's phase, not the project's: the model is the project's all the same)
+                    if (p == null || p.PostSite || (p.Plan.FrontA.Upgrade == 0 && p.Plan.FrontA.Phase != (byte)pr.Phase)) continue;
                     var nf = p.Plan.FrontA;
                     nf.Model = pr.Model;
                     float dv = math.abs(MachineMotion.FrontSpeed(nf, clk, now) - MachineMotion.FrontSpeed(p.Plan.FrontA, clk, now));
@@ -914,6 +967,7 @@ namespace RealisticRoadWorks.V3.Machines
                     {
                         var p = m_HoRole[j];
                         if (p.Plan.Count <= 0) continue;
+                        if (c.Upgrade && p.Crew != i) continue;   // mode H: crews work different bands, a machine never crosses to another
                         MachineMotion.State(p.Plan, clk, now, out var s);
                         var lim = MachineLimits.Of(role, view.Phase);
                         float t = MachineLimits.MinLegSeconds(anchor - s.U, lim.VFwd, lim.Accel);
@@ -1055,9 +1109,11 @@ namespace RealisticRoadWorks.V3.Machines
                 }
             }
             if (!c.Visible && !c.KeepLeft && !c.KeepRight && !c.KeepParkL && !c.KeepParkR) return true;
-            var probe = Probe(role);
+            var probe = c.LateralMetres ? Probe(role, UwScaleOf(c, KindOf(role))) : Probe(role);
             float u = math.clamp(slot.U, c.Trim0, c.Trim1);
+            if (c.LateralMetres) u = Choreo.ClampU(c, probe, u);
             bool ok = Choreo.LatRange(c, probe, u, out _, out _);
+            if (!ok && c.LateralMetres) MxUpgradeStats.NoFit++;
             if (!ok && (c.State.NoFitLogged & (1 << (int)role)) == 0)
             {
                 c.State.NoFitLogged |= 1 << (int)role;
@@ -1075,6 +1131,31 @@ namespace RealisticRoadWorks.V3.Machines
             ProbeSize(p);
             return p;
         }
+
+        // A probe for a mode H band crew: the box of a live puppet of the same kind AND root scale, else the defaults scaled to it.
+        private static readonly Puppet[] s_UwProbes = new Puppet[(int)MachineRole.Count];
+        private static Puppet Probe(MachineRole role, float scale)
+        {
+            var p = s_UwProbes[(int)role];
+            if (p == null) s_UwProbes[(int)role] = p = new Puppet { Kind = KindOf(role), Role = role, Upgrade = true };
+            p.UwBand = -1;
+            p.UwDropStretch = false;
+            p.Scale = scale;
+            foreach (var o in MachineRegistry.All)
+                if (o.Kind == p.Kind && math.abs(o.Scale - scale) < 1e-3f) { p.BoxHalfWid = o.BoxHalfWid; p.BoxHalfLen = o.BoxHalfLen; p.BoxOffZ = o.BoxOffZ; return p; }
+            ProbeSize(p);
+            if (p.ExcavatorRig && math.abs(scale - RRWConst.kExcavatorScale) > 1e-3f)
+            {
+                float k = scale / RRWConst.kExcavatorScale;
+                p.BoxHalfWid *= k; p.BoxHalfLen *= k;
+            }
+            return p;
+        }
+
+        // Root scale of a band crew's machine: the mini excavator (and grader) when the band is too narrow for the full one.
+        private static float UwScaleOf(PlanContext c, MachineKind kind) =>
+            c.LateralMetres && c.Crew.SmallMachines && (kind == MachineKind.Excavator || kind == MachineKind.Grader) ? RRWConst.kMiniExcavatorScale
+            : kind == MachineKind.Excavator || kind == MachineKind.Grader ? RRWConst.kExcavatorScale : 1f;
 
         // Box width of a role before it exists (the last measured puppet of the same kind, else conservative defaults).
         private static void ProbeSize(Puppet probe)
@@ -1100,6 +1181,10 @@ namespace RealisticRoadWorks.V3.Machines
             c.Em = em;
             c.Project = pr;
             c.View = pr.View();
+            c.ViewBase = c.View;
+            c.Upgrade = c.View.IsUpgrade;
+            c.LateralMetres = false;
+            c.UwBand = -1;
             c.State = st;
             c.Track = td;
             c.Tv = MachineTrackStore.View();
@@ -1126,6 +1211,9 @@ namespace RealisticRoadWorks.V3.Machines
             c.Narrow = 2f * flatMin < RRWConst.kTurnMinFlatWidth;
             c.CanTurn = !c.Narrow;
             SetLanePolicy(c, pr);
+            c.LaneReadyOk = c.ReadyOk; c.LaneNoSpawn = c.NoSpawn; c.LaneNoSpawnWhy = c.NoSpawnWhy;
+            c.LaneNarrow = c.Narrow; c.LaneCanTurn = c.CanTurn;
+            if (c.Upgrade) UwCrewPolicy(c);   // crew 0 (SetCrew ran before the lane policy)
             // overlap planner inputs: this project's puppets + other projects' puppets near the chain
             c.Others.Clear();
             bool haveMid = ChainMap.Point(em, pr, 0.5f * pr.ChainLength, out float3 mid, out _);
@@ -1147,12 +1235,14 @@ namespace RealisticRoadWorks.V3.Machines
             c.CrewIndex = crew;
             c.Crews = n;
             c.CS = st.Crews[crew];
+            if (c.Upgrade) c.View = c.ViewBase;
             c.Crew = PhasePlan.Crew(c.View, crew);
             c.SecLo = c.Crew.SecLo;
             c.SecHi = c.Crew.SecHi;
             if (!(c.SecHi > c.SecLo)) { c.SecLo = c.Trim0; c.SecHi = c.Trim1; }
             c.Front = FrontOf(c.Project, crew, n);
             c.FrontSpeed = MachineMotion.FrontSpeed(c.Front, c.Clk, c.Now);
+            if (c.Upgrade) UwCrewPolicy(c);   // band crew: metres, its band's phase, readiness
         }
 
         private PlanContext Context(EntityManager em, ProjectRecord pr, MachineProjectState st, TrackData td, double now, int crew)
@@ -1207,7 +1297,8 @@ namespace RealisticRoadWorks.V3.Machines
             bool visiblePhase = constr && (ph == WorksPhase.Paving || ph == WorksPhase.Finishing || ph == WorksPhase.Complete);
             bool hidden = PhasePlan.IsHidden(pr.Kind, pr.Mode, ph);
             // a kept sidewalk on a visible road (C3/C4, D0 with open / draining house sides): stay inside the carriageway
-            c.Visible = visiblePhase || c.Open != RoadZones.None || (!hidden && (c.Keep & RoadZones.Sidewalks) != RoadZones.None);
+            c.Visible = visiblePhase || c.Open != RoadZones.None || (!hidden && (c.Keep & RoadZones.Sidewalks) != RoadZones.None)
+                        || v.IsUpgrade;   // upgrade works: the road stays visible and in use
             c.KeepLeft = (c.Keep & RoadZones.LeftHalf) != 0;
             c.KeepRight = (c.Keep & RoadZones.RightHalf) != 0;
             // parking strips that hold parked cars (EdgeRecord.ZonesParked: edges with buildings keep vanilla parking,
@@ -1259,6 +1350,13 @@ namespace RealisticRoadWorks.V3.Machines
         // Narrow sites: no TruckB; verge roles only when the verge is usable.
         private bool RoleUsable(PlanContext c, MachineRole role, CrewSlot slot)
         {
+            if (c.LateralMetres)
+            {
+                // a mode H band is one lane for the machines: one truck in line, loaded from the front; next to driveways the
+                // excavator dumps on its spoil only (a loading truck would stand in a keep-out ahead of it)
+                if (role == MachineRole.TruckB && slot.Activity != MachineActivity.DriveOut) return false;
+                if (slot.Activity == MachineActivity.LoadAtFront && Choreo.UwKeepOutsOnSide(c, c.UwBand)) return false;
+            }
             if (c.Narrow && role == MachineRole.TruckB) return false;
             // Without K-turns (visible road: C3) the single feed truck shuttles from a rolling base ahead of the
             // paver; the C3 waiting truck (reverse-in hand-over at the hopper) was the main source of trucks driving through
@@ -1367,6 +1465,7 @@ namespace RealisticRoadWorks.V3.Machines
                     // a parked slot never stands on another machine's resting box or in a working machine's path
                     if (Choreo.ResolveStatic(c, p, ref u, lat, out string shifted) && RRWLog.VerboseEnabled)
                         RRWLog.Verbose("machines: " + p + " parked " + shifted + " (u=" + RRWLog.F(u) + ")");
+                    Choreo.UwShiftOutOfKeepOut(c, p, ref u, lat, slot.Facing >= 0 ? 1f : -1f);   // mode H: never parked in a driveway
                     var anim = p.Kind == MachineKind.Loader || p.Kind == MachineKind.LoaderDigger ? AnimKind.Carry : AnimKind.Rest;
                     Choreo.PlanStatic(p, c, u, lat, slot.Facing >= 0 ? (sbyte)1 : (sbyte)-1, p.Kind == MachineKind.Rmv, anim);
                     break;
@@ -1435,7 +1534,7 @@ namespace RealisticRoadWorks.V3.Machines
             float u = math.clamp(F + off, lo, hi);
             if (ret.On) u = math.min(u, ret.Home + ret.Speed * (float)math.max(0.0, ret.By - c.Now));
             lat = Choreo.LatOf(c, slot.Lateral, u, p);
-            if (math.abs(slot.Lateral) >= 0.99f)
+            if (!c.LateralMetres && math.abs(slot.Lateral) >= 0.99f)
             {
                 // verge followers: validate the verge around the anchor; blocked -> floor fallback lane
                 float uu = u, ll = lat;
@@ -1746,11 +1845,14 @@ namespace RealisticRoadWorks.V3.Machines
             var kind = KindOf(role);
             Entity prefab = PrefabFor(kind, settings, out float scale, out kind);
             if (prefab == Entity.Null) return null;
+            // mode H: a band too narrow for the full excavator gets the mini excavator (the same rig at a smaller root scale)
+            if (c.LateralMetres && c.Crew.SmallMachines && (kind == MachineKind.Excavator || kind == MachineKind.Grader)) scale = RRWConst.kMiniExcavatorScale;
             var p = new Puppet
             {
                 ProjectId = c.Project.Id, Role = role, Kind = kind, Prefab = prefab, Scale = scale,
                 Seed = (ushort)c.Project.Seed, SpawnUpdate = RRWClock.UpdateIndex, Track = c.Track,
                 Crew = c.CrewIndex, LimPhase = c.View.Phase,
+                Upgrade = c.Upgrade, UwBand = c.LateralMetres ? c.UwBand : -1,
             };
             var rnd = new Unity.Mathematics.Random((uint)(c.Project.Seed * 7919u + (uint)role * 104729u + (uint)c.CrewIndex * 15485863u) | 1u);
             p.LightJitter = rnd.NextFloat(-0.05f, 0.05f);
@@ -1765,19 +1867,26 @@ namespace RealisticRoadWorks.V3.Machines
             bool atAnchor = c.State.SpawnAtAnchor || (c.CS.AnchorMask & bit) != 0 || (c.HalvesActive && c.Stage.Index == 1);
             StartState(c, p, role, slot, atAnchor, out float u0, out float lat0, out sbyte f0);
             // never spawn inside another machine - slide along the lane, else try again next update
-            // (1 s later - no Puppet allocation every update while the spot is taken / in a path owner's path)
-            if (!SpawnSpot(c, p, ref u0, lat0))
+            // (1 s later - no Puppet allocation every update while the spot is taken / in a path owner's path).
+            // A mode H band strip is one lane wide: the crew truck and the trucks waiting at its entry would keep the entry
+            // taken for good, so a band machine whose entry spot is taken starts at its work anchor instead.
+            bool spot = SpawnSpot(c, p, ref u0, lat0);
+            if (!spot && c.LateralMetres && !atAnchor)
+            {
+                StartState(c, p, role, slot, true, out u0, out lat0, out f0);
+                spot = SpawnSpot(c, p, ref u0, lat0);
+            }
+            if (!spot)
             {
                 c.CS.SpawnRetryAt[(int)role] = now + 1.0;
                 if (RRWLog.VerboseEnabled) RRWLog.Verbose("machines: spawn of p" + c.Project.Id + "/c" + c.CrewIndex + "/" + role + " deferred: no free spot near u=" + RRWLog.F(u0) + " lat=" + RRWLog.F(lat0));
                 return null;
             }
             // the spawn box lies only in groups of WorkZonesReady (Outside aside); else wait (the gate opens
-            // when the group is drained / the half is no longer kept)
-            var zSpawn = StandZones(c, p, u0, lat0) & RoadZones.AllLanes & ~c.Ready;
-            if (zSpawn != RoadZones.None)
+            // when the group is drained / the half is no longer kept). Mode H band crews: inside the band's machine-safe run
+            if (c.LateralMetres ? !UwSpawnBoxOk(c, p, u0, lat0) : (StandZones(c, p, u0, lat0) & RoadZones.AllLanes & ~c.Ready) != RoadZones.None)
             {
-                Gate(c.State, role, "spawn box touches a not-ready group", null);
+                Gate(c.State, role, c.LateralMetres ? "spawn box outside the band's machine-safe run" : "spawn box touches a not-ready group", null);
                 return null;
             }
             if ((c.CS.AnchorMask & bit) != 0) { c.CS.AnchorMask &= ~bit; MxSpeed.HandAnchorSpawns++; }
@@ -1801,7 +1910,7 @@ namespace RealisticRoadWorks.V3.Machines
             }
             else Replan(p, c, role, slot);
             p.Activity = slot.Activity;
-            p.IntentKey = IntentKey(role, slot, c);
+            p.IntentKey = RoleKey(c, p, role, slot);
             p.PlannedPhase = c.View.Phase;
             p.PlannedWorking = c.Working;
             p.PlannedTrackRevision = c.Track.Revision;
@@ -1856,6 +1965,7 @@ namespace RealisticRoadWorks.V3.Machines
                 float uu = Choreo.ClampU(c, p, want);
                 if (k > 0 && math.abs(uu - want) > 0.5f) continue;
                 if (!Choreo.SpotFree(p, c, uu, lat)) continue;
+                if (c.Upgrade && Choreo.UwBandOf(c, p) >= 0 && Choreo.UwInKeepOut(c, p, uu, lat)) continue;   // never spawned standing in a driveway
                 if (!owner && Choreo.InWorkPath(c, p, uu, lat, MxConst.kSpawnPathHorizon, MxConst.kSpawnPathHorizonOther) != null) { pathHit = true; continue; }
                 u = uu;
                 return true;
@@ -1992,7 +2102,7 @@ namespace RealisticRoadWorks.V3.Machines
             }
             u = anchor;
             bool dig = slot.Activity == MachineActivity.Dig || slot.Activity == MachineActivity.Break;
-            float v = math.abs(slot.Lateral) >= 0.99f ? (slot.Lateral < 0f ? -0.45f : 0.45f) : slot.Lateral;
+            float v = !c.LateralMetres && math.abs(slot.Lateral) >= 0.99f ? (slot.Lateral < 0f ? -0.45f : 0.45f) : slot.Lateral;
             lat = dig ? Choreo.DiggerLat(c, v, u, p) : Choreo.LatOf(c, v, u, p);
             if (c.Narrow && p.Kind == MachineKind.Excavator) lat = 0f;
         }
@@ -2046,6 +2156,7 @@ namespace RealisticRoadWorks.V3.Machines
                     where += " exit u=" + RRWLog.F(end) + " (" + exitWhy + ")";
                     // a stop at a chain end that is not a connected exit, or a C4 Vacate leaver that cannot reach one soon
                     ClassifyDeadEnd(p, c, s.U, s.Hu >= 0f ? (sbyte)1 : (sbyte)-1, end);
+                    UwLeaveEnd(p, c, end);
                     if (p.DeadEndLeave) where += " DEAD-END(" + p.DeadEndWhy + ")";
                 }
                 catch (Exception e) { RRWLog.ErrorOnce("machines leave plan", e); }
@@ -2175,7 +2286,7 @@ namespace RealisticRoadWorks.V3.Machines
             bool outOfSight = p.CamDist > RRWConst.kMachineDespawnRadius || p.CulledUpdates >= RRWConst.kMachineCulledUpdates;
             bool projectAllows = false;
             if (SiteRegistry.TryGetProject(p.ProjectId, out var pr))
-                projectAllows = settings.MachinesOn && pr.AllowMachines && pr.Mode == VisualMode.FullDig;
+                projectAllows = settings.MachinesOn && pr.AllowMachines && ModeHasMachines(pr);
             // A puppet of a LOD-out crew (beyond kMaxActiveCrewsGlobal / far) goes like a leaver: out of sight only
             bool candidate = p.PostSite || p.Outgoing || !projectAllows || p.LodOut;
             if (candidate && outOfSight && ui - p.SpawnUpdate > 30u)
@@ -2226,6 +2337,26 @@ namespace RealisticRoadWorks.V3.Machines
                     uint pid = p.ProjectId;
                     Despawn(em, p, "left through the exit");
                     AdvanceExitQueue(pid, exitU, now);
+                    return;
+                }
+            }
+            // A roller of upgrade works belongs to its band's compaction (base course, fresh asphalt, backfill). Once it leaves (the
+            // band's phase or window ended) it is gone as soon as its drive-off stopped, wherever that is, and at the latest
+            // kUwRollerLeaveSeconds after it began leaving, even in view: it never stays on the site into the next window (the
+            // re-marking crew works there next). FullDig rollers keep the leave rules above and below.
+            if (p.IsRoller && p.Upgrade && p.PostSite && p.Plan.Count > 0 && !double.IsNaN(p.LeaveTau))
+            {
+                double stop = MachineMotion.MotionEnd(p.Plan);
+                bool stopped = !p.LeaveContinue && !p.GuardHeld && !double.IsNaN(stop) && !double.IsInfinity(stop) &&
+                               now >= stop + MxConst.kExitParkRemoveSeconds;
+                bool late = now - p.LeaveTau >= MxConst.kUwRollerLeaveSeconds;
+                if (stopped || late)
+                {
+                    MxUpgradeStats.RollerRemovals++;
+                    string why = "upgrade works roller left its band (" + p.LeaveWhy + "): " + (stopped ? "drive-off stopped" : "leaving for " +
+                                 RRWLog.F((float)(now - p.LeaveTau)) + " s") + (outOfSight ? "" : ", in view") + " dist=" + RRWLog.F(p.CamDist);
+                    RRWLog.Info("machines: " + p + " removed: " + why);
+                    Despawn(em, p, why);
                     return;
                 }
             }
@@ -2585,6 +2716,7 @@ namespace RealisticRoadWorks.V3.Machines
                 MachineChecks.Round2(em, problems);
                 MachineChecks.Round4(em, problems);
                 MachineChecks.Round5(em, problems, true);   // rollers, IK digging, puffs; liveRollerObjects vs units
+                MachineChecks.RoundUpgrade(em, problems);   // mode H: machine-safe runs, clearances, driveway keep-outs, slew
             }
             catch (Exception e) { problems.Add("machines: check failed: " + e.Message); }
         }
@@ -2671,7 +2803,7 @@ namespace RealisticRoadWorks.V3.Machines
     }
 
     // Live invariant checks shared by rrw.check and rrw.mx.check.
-    public static class MachineChecks
+    public static partial class MachineChecks
     {
         private static readonly PlanContext s_Ctx = new PlanContext();
         private static readonly List<Choreo.Obb> s_Boxes = new List<Choreo.Obb>(64);
@@ -2736,8 +2868,9 @@ namespace RealisticRoadWorks.V3.Machines
                 var v = pr.View();
                 MachineReport.Zones(p, v.Trim0, v.Trim1, now, out var zNow, out var zPlan, ref dummy);
                 var open = pr.OpenLanes & RoadZones.AllLanes;
-                if ((zNow & open) != 0) { if (inOpen++ == 0) fOpen = p + " zones=" + zNow + " open=" + open; }
-                if (!p.PostSite && !p.Outgoing && pr.MachinesReportFresh(ui) && !MachineDebug.LegacyReady)
+                bool band = p.Upgrade && p.UwBand >= 0;   // mode H band crews: RoundUpgrade (machine-safe sub-strips, not groups)
+                if (!band && (zNow & open) != 0) { if (inOpen++ == 0) fOpen = p + " zones=" + zNow + " open=" + open; }
+                if (!band && !p.PostSite && !p.Outgoing && pr.MachinesReportFresh(ui) && !MachineDebug.LegacyReady)
                 {
                     var bad = (zNow | zPlan) & RoadZones.AllLanes & ~pr.WorkZonesReady;
                     if (bad != RoadZones.None && pr.Switch == StageSwitch.None)
@@ -2782,6 +2915,7 @@ namespace RealisticRoadWorks.V3.Machines
 
         // Crew and speed invariants (rrw.check lines that must stay 0):
         //  * speed / acceleration violations of the observed motion against MachineLimits (MxSpeed, since the last reset);
+        //  * runaway stops and carried speeds dropped by the runaway guard (MxSpeed.Runaways / RunawayClamps);
         //  * a working puppet (not leaving) more than kOutOfRangeCheck outside its crew's range [SecLo, SecHi];
         //  * a puppet of a crew index beyond the project's crew count;
         //  * the job-side front model (FrontLin) disagreeing with PhasePlan.SectionFront (front model mismatch > 1 cm).
@@ -2789,6 +2923,8 @@ namespace RealisticRoadWorks.V3.Machines
         {
             if (MxSpeed.SpeedViolations > 0) problems.Add("machines: " + MxSpeed.SpeedViolations + " speed violations (first: " + MxSpeed.FirstSpeed + "; last: " + MxSpeed.LastSpeed + ")");
             if (MxSpeed.AccelViolations > 0) problems.Add("machines: " + MxSpeed.AccelViolations + " acceleration violations (first: " + MxSpeed.FirstAccel + "; last: " + MxSpeed.LastAccel + ")");
+            if (MxSpeed.Runaways > 0) problems.Add("machines: " + MxSpeed.Runaways + " runaway stops (first: " + MxSpeed.FirstRunaway + ")");
+            if (MxSpeed.RunawayClamps > 0) problems.Add("machines: " + MxSpeed.RunawayClamps + " carried speeds above the runaway limit dropped (first: " + MxSpeed.FirstRunawayClamp + ")");
             double now = MachineRegistry.Clock.Tau(RRWClock.RenderFrame, RRWClock.RenderFrameTime);
             int outRange = 0, badCrew = 0, frontBad = 0;
             string fOut = "", fCrew = "", fFront = "";

@@ -82,6 +82,9 @@ namespace RealisticRoadWorks.V3.Surfaces
         public bool HasPrev;
         public int Piece;                // piece index on its (edge, layer, band) row (sorted by LS0)
         public uint OutgoingSince;       // update it was replaced by a piece-topology change (0 = current piece)
+        public float LatLo = float.NaN;  // EDGE-frame laterals of the last write (upgrade works: a sub-strip that moved sideways
+        public float LatHi = float.NaN;  // is rewritten; hand-overs between overlapping sub-strips use them)
+        public bool SnapChecked;         // upgrade works: the one re-snap after the first appearance was scheduled
 
         public bool Pending => Area == Entity.Null && Def != Entity.Null;
 
@@ -114,11 +117,33 @@ namespace RealisticRoadWorks.V3.Surfaces
         // [layer, band slot, piece]. A row (layer, band) holds its pieces compact and sorted by LS0 (slots
         // 0..n-1); a piece-count / band-kind change rewrites the whole row in one update (new areas first, the replaced ones wait
         // in Outgoing until the row and the covering layer have been on screen for an update).
+        // Upgrade works draw one polygon per sub-strip: their edges grow to kMaxSlots band slots (EnsureSlots), slot
+        // = band index * kSubStripsPerBand + sub-strip index, so a sub-strip keeps its row while other bands come and go.
         public const int kMaxPieces = SpanSet.Capacity;
-        public readonly TrackedArea[,,] Areas = new TrackedArea[(int)SurfaceLayer.Count, EdgeSection.kMaxIntervals, kMaxPieces];
+        public const int kSubStripsPerBand = 8;
+        public const int kMaxSlots = RRWConst.kUwMaxBands * kSubStripsPerBand;
+        public TrackedArea[,,] Areas { get; private set; } = new TrackedArea[(int)SurfaceLayer.Count, EdgeSection.kMaxIntervals, kMaxPieces];
         public readonly List<TrackedArea> Outgoing = new List<TrackedArea>(4);
         // high-water mark of used piece slots per row (rows are only scanned up to it; a row diff compacts and resets it)
-        public readonly byte[,] RowN = new byte[(int)SurfaceLayer.Count, EdgeSection.kMaxIntervals];
+        public byte[,] RowN { get; private set; } = new byte[(int)SurfaceLayer.Count, EdgeSection.kMaxIntervals];
+
+        public int Slots => Areas.GetLength(1);
+
+        // Grows the band-slot dimension (upgrade works); tracked rows are kept.
+        public void EnsureSlots(int slots)
+        {
+            if (slots <= Slots) return;
+            var a = new TrackedArea[(int)SurfaceLayer.Count, slots, kMaxPieces];
+            var r = new byte[(int)SurfaceLayer.Count, slots];
+            for (int l = 0; l < Areas.GetLength(0); l++)
+                for (int b = 0; b < Areas.GetLength(1); b++)
+                {
+                    r[l, b] = RowN[l, b];
+                    for (int k = 0; k < kMaxPieces; k++) a[l, b, k] = Areas[l, b, k];
+                }
+            Areas = a;
+            RowN = r;
+        }
 
         public void Put(int layer, int band, int piece, TrackedArea t)
         {
@@ -126,6 +151,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             if (t != null && piece >= RowN[layer, band]) RowN[layer, band] = (byte)(piece + 1);
         }
         public bool Completed;           // turned into scars at Completing: never respawn
+        public bool EndsUpgrade;         // the ends were classified for upgrade works (dead ends clipped, no round cap)
         public uint SeenUpdate;
         public int GeomRev = int.MinValue;
         public EdgeEnds Ends;
@@ -229,6 +255,10 @@ namespace RealisticRoadWorks.V3.Surfaces
         public uint BypassWaitSince;     // first update the project's bypass work was deferred (0 = none)
         public int LastCrews = -1;       // crew layout of the last crew-layout log line
         public int MaxPieces;            // most pieces on one (edge, layer, band) row in the last processed update
+        // Upgrade works log state (one Info line when the window, primitive or sub-strip covers change)
+        public uint UpgradeSig;
+        public int UpgradeWindow = int.MinValue;   // window of the last update (a switch is written like a phase change)
+        public bool UpgradeWaiting;      // an edge's band data was not current in the last update (logged once per wait)
     }
 
     // Node cap at a junction whose every edge is a works edge:
@@ -275,6 +305,10 @@ namespace RealisticRoadWorks.V3.Surfaces
         public readonly List<Entity> Conflicts = new List<Entity>(1);   // other registry edges whose footprint overlaps it
         public uint WaitSince;           // first update a hand-over to a demolition was waited for (0 = none)
         public uint CreatedUpdate;
+        // Upgrade works on the road under the scar: the scar is clipped to what lies outside the works bands, once per
+        // (edge, band layout); ClipSigs[i] is the layout signature ClipEdges[i] was clipped against
+        public readonly List<Entity> ClipEdges = new List<Entity>(1);
+        public readonly List<uint> ClipSigs = new List<uint>(1);
     }
 
     // An area that is being replaced: deleted once its successor has been live for >= 1 update (or after a timeout).
@@ -292,6 +326,8 @@ namespace RealisticRoadWorks.V3.Surfaces
         Interior = 1,        // degree 2, both mode-A works edges: mitred cut at the node centre
         DeadEnd = 2,         // degree 1: round cap over the cul-de-sac
         WorksJunction = 3,   // degree >= 3, all mode-A works edges: node cap; terrain layers to the centre
+        OpenDeadEnd = 4,     // degree 1 on a road that stays visible (upgrade works): clip to the edge geometry like a visible
+                             // junction, no round cap over the cul-de-sac (the node's road surface is never dressed)
     }
 
     internal struct EdgeEnds
@@ -354,6 +390,13 @@ namespace RealisticRoadWorks.V3.Surfaces
         // replaced areas deleted after the hand-over / by timeout, projects whose bypass work was deferred to a later update
         public static int TopologyChanges, TopologyKept, OutgoingDeleted, OutgoingTimeouts, BypassDeferred, MaxPiecesSeen;
         public static string LastTopology = "none", LastCrews = "none";
+        // Upgrade works: sub-strip polygons wanted by the last upgrade project processed, scars clipped to the outside of the
+        // bands / checked and left whole / removed because nothing was left outside, edge updates that waited for band data
+        public static int UpgradePolygons, ScarsClipped, ScarsKeptOutside, ScarsInsideBands, UpgradeWaits;
+        public static string LastUpgrade = "none", LastScarClip = "none";
+        // Self-heal: live work-site areas that nothing tracked any more, removed by the orphan sweep
+        public static int OrphansRemoved;
+        public static string LastOrphan = "none";
 
         public static void ClearRuntime(string why)
         {
@@ -503,6 +546,25 @@ namespace RealisticRoadWorks.V3.Surfaces
                 Layers = DecalLayers.Terrain | DecalLayers.Roads, Priority = -89, Smoothness = kAsphaltSmoothness, Tint = asph,
                 Layer = SurfaceLayer.FreshAsphaltCover, RaisedQueue = true,
             });
+            // Upgrade works, the dug strip on a visible road: the verified subgrade dirt (Ore material untouched, subgrade tint) on
+            // Terrain|Roads at the raised queue, so it also covers the road surface and its markings. Prio -92 sits between the
+            // subgrade and the base course. No alpha variants (never a scar).
+            list.Add(new SurfaceCloneSpec
+            {
+                Name = PrefabNames.RoadDirt, Source = PrefabNames.SrcOre,
+                Layers = DecalLayers.Terrain | DecalLayers.Roads, Priority = -92, Smoothness = kSubgradeSmoothness, Tint = SurfacePalette.SubgradeTint,
+                Alpha = SurfacePalette.SubgradeAlpha, Layer = SurfaceLayer.RoadDirt, RaisedQueue = true,
+            });
+            // Upgrade works, the removed strip outside the narrowed road before it is broken up: the road asphalt texture
+            // worn grey and matte. Terrain only and the normal queue (it lies beside the road, never on it). Only drawn while
+            // RRWGates.UpgradeOldAsphalt is on; Base Course Cover takes its place otherwise.
+            list.Add(new SurfaceCloneSpec
+            {
+                Name = PrefabNames.OldAsphalt, Source = PrefabNames.SrcConcrete,
+                BaseTex = PrefabNames.TexAsphaltBase, NormalTex = PrefabNames.TexAsphaltNormal, MaskTex = PrefabNames.TexAsphaltMask,
+                Layers = DecalLayers.Terrain, Priority = -92, Smoothness = SurfacePalette.kOldAsphaltSmoothness, Tint = SurfacePalette.OldAsphaltTint,
+                Layer = SurfaceLayer.OldAsphalt,
+            });
             // Staged traffic: yellow temporary lane lines on the half that is open to
             // traffic in C4a. Light, uniform source with its own material (no texture swap) tinted works yellow; Roads layer only
             // (only ever drawn on the visible carriageway); roundness 0.01 (seen in game: the 0.5 default grew a 0.15 m line to ~0.53 m and
@@ -580,6 +642,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         public static readonly float3 TopsoilTint = RRWConst.kTopsoilTint;            // freshly turned soil (0.90, .78, .69; was (1.0, .92, .70): yellow sand)
         public static readonly float3 SubgradeTint = RRWConst.kSubgradeTint;          // verified "Subgrade Src" brown dirt (.85, .75, .65)
         public static readonly float3 AsphaltTint = new float3(RRWConst.kAsphaltTint); // verified very dark fresh asphalt (.45)
+        public static readonly float3 OldAsphaltTint = new float3(0.70f);              // worn old asphalt (the fresh asphalt is .45)
         public static readonly float3 TempMarkingTint = RRWConst.kTempMarkingTint;     // works yellow temporary lines (Y1, Concrete)
         public static readonly float3 TempMarkingTintY2 = new float3(1.15f, 0.95f, 0.20f); // experimental variant Y2 (Sand Surface 01)
         public static readonly float3 TempMarkingTintY3 = new float3(1.10f, 0.85f, 0.12f); // experimental variant Y3 (Pavement Surface 01)
@@ -604,6 +667,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         public const float kTopsoilSmoothness = 0.2f;    // was 0.3: matte, freshly turned soil is not glossy
         public const float kSubgradeSmoothness = 0.1f;
         public const float kBaseSmoothness = 0.15f;
+        public const float kOldAsphaltSmoothness = 0.25f; // worn: matte next to the fresh asphalt's 0.6
 
         // ---- fade ladders (percent of the base alpha). Every value is a registered clone "<name> a<pct>" (100 = base name).
         // Soil (topsoil + subgrade: construction verges and the demolition scar) fades in small steps over its lifetime;

@@ -15,6 +15,7 @@ namespace RealisticRoadWorks.V3.Director
     {
         private readonly List<WorksRequest> m_Requests = new List<WorksRequest>(16);
         private readonly Dictionary<uint, List<Entity>> m_CancelEdgeGroups = new Dictionary<uint, List<Entity>>();
+        private readonly Dictionary<uint, List<Entity>> m_EndUpgradeGroups = new Dictionary<uint, List<Entity>>();
         private readonly Dictionary<int, List<Entity>> m_StartBatchesC = new Dictionary<int, List<Entity>>();
         private readonly Dictionary<int, List<Entity>> m_StartBatchesD = new Dictionary<int, List<Entity>>();
         private readonly List<SiteFactoryEdge> m_FactoryIn = new List<SiteFactoryEdge>(16);
@@ -28,6 +29,7 @@ namespace RealisticRoadWorks.V3.Director
             m_Requests.Clear();
             WorksRequests.Drain(m_Requests);
             foreach (var l in m_CancelEdgeGroups.Values) l.Clear();
+            foreach (var l in m_EndUpgradeGroups.Values) l.Clear();
             foreach (var l in m_StartBatchesC.Values) l.Clear();
             foreach (var l in m_StartBatchesD.Values) l.Clear();
 
@@ -36,6 +38,12 @@ namespace RealisticRoadWorks.V3.Director
                 var r = m_Requests[i];
                 try { Handle(r); }
                 catch (Exception e) { RRWLog.ErrorOnce("director request " + r.Type, e); }
+            }
+            foreach (var kv in m_EndUpgradeGroups)
+            {
+                if (kv.Value.Count == 0) continue;
+                try { EndUpgradeEdges(kv.Key, kv.Value); }
+                catch (Exception e) { RRWLog.ErrorOnce("director request EndUpgrade", e); }
             }
             foreach (var kv in m_CancelEdgeGroups)
             {
@@ -96,6 +104,14 @@ namespace RealisticRoadWorks.V3.Director
                 case WorksRequestType.CancelEdgeInstant:
                     CancelEdgeInstant(r.Edge);
                     return;
+                case WorksRequestType.EndUpgrade:
+                    if (r.Edge != Entity.Null && r.Aux != 0)
+                    {
+                        AddTo(m_EndUpgradeGroups, r.Aux, r.Edge);
+                        RRWLog.Verbose("director: EndUpgrade edge " + RRWLog.E(r.Edge) + " from project #" + r.Aux + " (refund " + RRWLog.F(r.Value) + " credited by the bulldozer)");
+                    }
+                    else RRWLog.Info("director: EndUpgrade without an edge or old project id dropped (edge " + RRWLog.E(r.Edge) + ", project #" + r.Aux + ")");
+                    return;
             }
 
             // Pause works was removed. Values 1 / 2 (the old pause and resume requests) are dropped.
@@ -129,6 +145,11 @@ namespace RealisticRoadWorks.V3.Director
                 case WorksRequestType.JumpPhase:
                 {
                     if (r.Phase == WorksPhase.Complete) { SetProgress(proj, 1f, "jump"); break; }
+                    if (IsUpgradeProject(proj))
+                    {
+                        RRWLog.Info("director: jump to " + r.Phase + " refused for upgrade project #" + proj.Id + ": its phases follow the windows (rrw.uw.jump)");
+                        break;
+                    }
                     if (r.Phase == WorksPhase.None || PhasePlan.KindOf(r.Phase) != ProjectKind(proj))
                     {
                         RRWLog.Info("director: jump to " + r.Phase + " refused for " + ProjectKind(proj) + " project #" + proj.Id);
@@ -220,7 +241,7 @@ namespace RealisticRoadWorks.V3.Director
             ps.Carry = 0.0;
             ps.ProgressJumped = true;   // the stage switch is re-derived from the new p (like a load)
             RRWLog.Info("director: project #" + proj.Id + " " + why + " p " + RRWLog.F(math.max(0f, before)) + " -> " + RRWLog.F(p)
-                        + " (" + PhasePlan.PhaseOf(ProjectKind(proj), p, out float _) + ")");
+                        + " (" + PhaseAt(proj, ProjectKind(proj), p, out float _) + ")");
         }
 
         // ------------------------------------------------------------------ dev: SetCrews
@@ -258,7 +279,11 @@ namespace RealisticRoadWorks.V3.Director
                 Entity e = proj.Edges[i];
                 if (!em.Exists(e) || !em.HasComponent<RoadWorksSite>(e)) continue;
                 var site = em.GetComponentData<RoadWorksSite>(e);
-                cost += WorkTime.RushCost(site.m_PaidCost, math.abs(site.m_ChainU1 - site.m_ChainU0), p, s.RushCostPercent);
+                float len = math.abs(site.m_ChainU1 - site.m_ChainU0);
+                // upgrade works: the length-based floor is scaled by the upgrade's share of a full rebuild (the price the panel shows)
+                cost += site.IsUpgrade
+                    ? WorkTime.RushCost(site, len, p, s.RushCostPercent, WorkTime.FullRebuildFrames(site.m_ChainLength, EcsUtil.RoadClass(em, e), s))
+                    : WorkTime.RushCost(site.m_PaidCost, len, p, s.RushCostPercent);
             }
             int c = (int)math.min(cost, int.MaxValue);
             if (!EcsUtil.TryPay(em, m_CitySystem.City, c))
@@ -279,6 +304,7 @@ namespace RealisticRoadWorks.V3.Director
         {
             var em = EntityManager;
             var s = m_S;
+            if (UpgradeCancelRefused(proj, instant ? "instant cancel" : "cancel")) return;
             float p = ProjectProgress(proj, out var first, out int count);
             if (count == 0) return;
             var kind = first.Kind;
@@ -471,6 +497,7 @@ namespace RealisticRoadWorks.V3.Director
         {
             if (!SiteRegistry.TryGetProject(projectId, out var proj)) return;
             var em = EntityManager;
+            if (UpgradeCancelRefused(proj, "bulldozer cancel of " + edges.Count + " edge(s)")) return;
             if (ProjectKind(proj) != WorksKind.Construction) { RRWLog.Verbose("director: CancelEdge on demolition project #" + projectId + " ignored"); return; }
             int inProject = 0;
             for (int i = 0; i < edges.Count; i++) if (proj.Edges.Contains(edges[i])) inProject++;
@@ -518,6 +545,8 @@ namespace RealisticRoadWorks.V3.Director
                 var site = em.GetComponentData<RoadWorksSite>(e);
                 var ed = em.GetComponentData<Edge>(e);
                 float len = em.HasComponent<Curve>(e) ? em.GetComponentData<Curve>(e).m_Length : math.abs(site.m_ChainU1 - site.m_ChainU0);
+                // upgrade works are never dug (DigEligible false); their tail is copied with the site below (bands are in the
+                // edge's own frame, the schedule is project-wide), so the split-off works go on exactly as before
                 m_FactoryIn.Add(new SiteFactoryEdge
                 {
                     Edge = e, StartNode = ed.m_Start, EndNode = ed.m_End, Length = len,
@@ -544,7 +573,7 @@ namespace RealisticRoadWorks.V3.Director
             {
                 var res = m_FactoryOut[i];
                 var old = em.GetComponentData<RoadWorksSite>(res.Edge);
-                var site = old;   // everything kept (p, mode, flags, money, natural samples, seed) except the chain
+                var site = old;   // everything kept (p, mode, flags, money, natural samples, seed, upgrade tail) except the chain
                 uint id = res.Site.m_ProjectId;
                 float U = res.Site.m_ChainLength;
                 bool flip = m_SplitFlip[id];
@@ -571,6 +600,14 @@ namespace RealisticRoadWorks.V3.Director
             var em = EntityManager;
             if (!em.Exists(edge) || !em.HasComponent<RoadWorksSite>(edge)) return;
             var site = em.GetComponentData<RoadWorksSite>(edge);
+            if (site.Mode == VisualMode.HalfWidth || site.IsUpgrade)
+            {
+                DirectorShared.UpgradeCancelsRefused++;
+                RRWLog.Info("director: instant cancel of edge " + RRWLog.E(edge) + " refused for upgrade project #" + proj.Id
+                            + ": upgrade works are never cancelled (bulldozing the road ends them)");
+                return;
+            }
+            if (UpgradeCancelRefused(proj, "instant cancel of edge " + RRWLog.E(edge))) return;
             if (site.Kind != WorksKind.Construction) return;
             float p = site.Progress;
             if (p >= RRWConst.kInstantCancelProgress + DirConst.kCancelInstantSlack || !m_S.InstantCancelUnfinished)
@@ -583,6 +620,81 @@ namespace RealisticRoadWorks.V3.Director
             m_ReqEdges.Clear();
             m_ReqEdges.Add(edge);
             InstantDelete(m_ReqEdges, p, "edge " + RRWLog.E(edge) + " of project #" + proj.Id);
+        }
+
+        // ------------------------------------------------------------------ upgrade works: EndUpgrade
+
+        // Tools (bulldozer on an upgrade site, or a re-upgrade that leaves nothing to build): `edges` leave upgrade project oldId.
+        //  * the edge carries another site now (the bulldozer's demolition, a merged upgrade project): it leaves the old project at
+        //    once (Traffic, Machines and Props see the record's project change), the other edges keep working;
+        //  * the edge still carries its upgrade site of the old project (the upgrade was undone): the works on it end now through
+        //    the normal teardown (p = 1: machines leave, the release opens the lanes), split off first when other edges go on;
+        //  * the site is gone: the lost-site pass already removed the record.
+        // No money moves here (the bulldozer credited its refund itself; an undone upgrade costs nothing).
+        private void EndUpgradeEdges(uint oldId, List<Entity> edges)
+        {
+            var em = EntityManager;
+            SiteRegistry.TryGetProject(oldId, out var old);
+            m_ReqEdges.Clear();
+            for (int i = 0; i < edges.Count; i++)
+            {
+                Entity e = edges[i];
+                bool alive = EcsUtil.Alive(em, e) && em.HasComponent<RoadWorksSite>(e);
+                var site = alive ? em.GetComponentData<RoadWorksSite>(e) : default;
+                if (alive && site.m_ProjectId == oldId && IsUpgradeSite(site))
+                {
+                    m_ReqEdges.Add(e);
+                    continue;
+                }
+                if (alive && site.m_ProjectId == oldId)
+                {
+                    // another site kind under the old project id: it becomes a project of its own on this edge
+                    MoveToOwnProject(e, "the bulldozer replaced its upgrade site");
+                    site = em.GetComponentData<RoadWorksSite>(e);
+                }
+                // re-key the record (detaches it from the old project) unless the lost-site pass already did
+                if (alive && (!SiteRegistry.TryGetEdge(e, out var rec) || rec.ProjectId != site.m_ProjectId)) RegisterSite(e, false);
+                if (old != null && old.Edges.Remove(e))
+                {
+                    old.Revision++;
+                    old.GetOrCreate<DirProjectState>(ModuleSlot.Director).SortDirty = true;
+                }
+                DirectorShared.UpgradeEdgesLeft++;
+                RRWLog.Info("director: edge " + RRWLog.E(e) + " left upgrade project #" + oldId + " ("
+                            + (alive ? "now " + site.Kind + " project #" + site.m_ProjectId : "site gone") + "), the other edges keep working");
+            }
+            if (old != null && old.Edges.Count == 0) SiteRegistry.RemoveProject(oldId);
+            if (m_ReqEdges.Count > 0 && old != null && SiteRegistry.Projects.ContainsKey(oldId))
+            {
+                var ended = new List<Entity>(m_ReqEdges);
+                EndUpgradeWorks(old, ended);
+            }
+            m_ReqEdges.Clear();
+        }
+
+        // The upgrade on these edges was undone: nothing is left to build. The whole project (or the edges split off into their
+        // own project) jumps to p = 1, so machines and devices leave by the normal teardown and the release opens the lanes.
+        private void EndUpgradeWorks(ProjectRecord proj, List<Entity> edges)
+        {
+            var em = EntityManager;
+            int withSite = 0;
+            for (int i = 0; i < proj.Edges.Count; i++)
+                if (em.Exists(proj.Edges[i]) && em.HasComponent<RoadWorksSite>(proj.Edges[i])) withSite++;
+            DirectorShared.UpgradesEnded++;
+            if (edges.Count >= withSite)
+            {
+                RRWLog.Info("director: upgrade project #" + proj.Id + " undone (" + edges.Count + " edge(s)): nothing left to build, the works end now");
+                SetProgress(proj, 1f, "upgrade undone");
+                return;
+            }
+            float U = 0f;
+            for (int i = 0; i < proj.Edges.Count; i++)
+                if (em.Exists(proj.Edges[i]) && em.HasComponent<RoadWorksSite>(proj.Edges[i])) U = math.max(U, em.GetComponentData<RoadWorksSite>(proj.Edges[i]).m_ChainLength);
+            var ids = new List<uint>(SplitOff(proj, edges, FrontSet.Of(0f, 1, U)));
+            RRWLog.Info("director: upgrade undone on " + edges.Count + " of " + withSite + " edge(s) of project #" + proj.Id + ": split off into "
+                        + ids.Count + " project(s) that end now, the other edges keep working");
+            for (int i = 0; i < ids.Count; i++)
+                if (SiteRegistry.TryGetProject(ids[i], out var np)) SetProgress(np, 1f, "upgrade undone");
         }
 
         // Instant cancel (p < 5 %): the Director deletes the edges itself and refunds exactly `paid` (one path,

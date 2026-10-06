@@ -69,6 +69,23 @@ namespace RealisticRoadWorks.V3.Tooling
             return fe;
         }
 
+        // Same, for a temp whose site belongs on another entity (target: the kept original of a Modify / Upgrade temp;
+        // Entity.Null = the temp itself). The chain is built from the temps, the site is written on the target.
+        public static SiteFactoryEdge FactoryEdge(EntityManager em, Entity edge, int paidCost, bool dependants, Entity target)
+        {
+            var fe = FactoryEdge(em, edge, paidCost, dependants);
+            fe.Target = target;
+            return fe;
+        }
+
+        // Unbuilt share of what a works edge has paid, credited to the city (mode H parts that end with a combine).
+        public static int RefundUnbuilt(EntityManager em, Entity city, in RoadWorksSite site)
+        {
+            int amount = WorkTime.CancelRefund(math.max(0, site.m_PaidCost), site.Progress, false);
+            EcsUtil.Credit(em, city, amount);
+            return amount;
+        }
+
         // Chain coordinate of a world point on a source edge's arc (beyond the ends: linear extension, see WorksTagSystem rule 1).
         public static float ChainUOf(EdgeArc arc, in RoadWorksSite src, float3 p) =>
             PhasePlan.ChainU(arc.ProjectExtended(p), src.m_ChainU0, src.m_ChainU1, arc.Length);

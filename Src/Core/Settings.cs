@@ -71,6 +71,12 @@ namespace RealisticRoadWorks.V3
         [SettingsUISection(kTraffic, kTrafficGroup)]
         public bool HalfWidthWorks { get; set; }
 
+        // "Road upgrades": what replacing a road with another type (or upgrading it) does. Realistic: partial upgrade works
+        // (mode H, only the changed strip is built); Full rebuild: a type change rebuilds the whole road; Instant: like the base
+        // game. Tools read it at apply time (decorations are always instant).
+        [SettingsUISection(kTraffic, kTrafficGroup)]
+        public UpgradeWorksMode UpgradeWorks { get; set; }
+
         [SettingsUISection(kTraffic, kTrafficGroup)]
         public bool RerouteInFlight { get; set; }
 
@@ -179,6 +185,7 @@ namespace RealisticRoadWorks.V3
             WorkZoneSpeedKmh = 30;
             StagedOpening = true;
             HalfWidthWorks = true;
+            UpgradeWorks = UpgradeWorksMode.Realistic;
             RerouteInFlight = true;
             RelocateParkedCars = true;
             HardCloseAfterDrain = false;
@@ -225,6 +232,7 @@ namespace RealisticRoadWorks.V3
         public bool StagedOpeningOn => StagedOpening && RRWDebug.On(DebugLayers.Closure);   // Director's input to PhasePlan.Stage / OpenLanes
         public bool TempMarkingsOn => SurfacesOn && TempMarkings;                             // Surfaces draws yellow lines
         public bool ApproachSignalsOn => ApproachSignals && RRWGates.AmberHead && PropsOn;   // Props spawns the amber head
+        public UpgradeWorksMode UpgradeMode => UpgradeWorks;                                 // Tools: the classification path of an apply
     }
 
     public static class RRWSettings
@@ -283,6 +291,7 @@ namespace RealisticRoadWorks.V3
             Opt(nameof(RRWSetting.Policy), "Closure policy", "Realistic: new and demolished roads close, upgrades of roads that serve buildings stay open as a slow zone. Always slow zone: traffic keeps flowing at work-zone speed (simple site, no excavation). Visual only: no effect on traffic (simple site, no excavation). Roads with machines on them stay closed until the machines have left; buildings that appear along them wait for access. A change applies to new works.");
             Opt(nameof(RRWSetting.StagedOpening), "Open sidewalks and one lane early", "Sidewalks open as soon as the new road is paved, behind a fence. During the markings one direction opens on its own half at work-zone speed with yellow temporary lines while the crew paints the other half, then the halves swap so the crew can finish both sides. Traffic in the closed direction takes a detour; houses on the closed half stay reachable. No direction opens on dead ends, tram roads, one-way roads, narrow roads or with a bus stop in the works half.");
             Opt(nameof(RRWSetting.HalfWidthWorks), "Rebuild streets with houses half by half", "Streets with houses that are rebuilt stay open on one half or on part of the lanes while the crew works on the rest.");
+            Opt(nameof(RRWSetting.UpgradeWorks), "Road upgrades", "What happens when you replace a road with another type or upgrade it. Realistic: only the changed part is built: new lanes, removed lanes or new markings, while the rest of the road stays in use. Full rebuild: any change of road type rebuilds the whole road. Instant: upgrades apply at once, like the base game. Trees, lights and other decorations are always instant.");
             Opt(nameof(RRWSetting.TempMarkings), "Yellow temporary markings", "Yellow temporary lane lines on the half of the road that is open during the works. Off: cones and fences only.");
             Opt(nameof(RRWSetting.ApproachSignals), "Flashing amber light", "A flashing amber traffic light where the open direction enters a half-closed road.");
             Opt(nameof(RRWSetting.WorkZoneSpeedKmh), "Work-zone speed (km/h)", "Speed limit on roads that stay open during works.");
@@ -314,6 +323,9 @@ namespace RealisticRoadWorks.V3
             d[m_S.GetEnumValueLocaleID(ClosurePolicy.Realistic)] = "Realistic";
             d[m_S.GetEnumValueLocaleID(ClosurePolicy.AlwaysSlowZone)] = "Always slow zone";
             d[m_S.GetEnumValueLocaleID(ClosurePolicy.VisualOnly)] = "Visual only";
+            d[m_S.GetEnumValueLocaleID(UpgradeWorksMode.Realistic)] = "Realistic";
+            d[m_S.GetEnumValueLocaleID(UpgradeWorksMode.FullRebuild)] = "Full rebuild";
+            d[m_S.GetEnumValueLocaleID(UpgradeWorksMode.Instant)] = "Instant";
             d[m_S.GetEnumValueLocaleID(QualityPreset.Low)] = "Low";
             d[m_S.GetEnumValueLocaleID(QualityPreset.Medium)] = "Medium";
             d[m_S.GetEnumValueLocaleID(QualityPreset.High)] = "High";
@@ -377,7 +389,126 @@ namespace RealisticRoadWorks.V3
         public const string TrafficSwitchingSides = P + "UI.Traffic.SwitchingSides"; // Switch Swap / Drain
         public const string TrafficCrewChangingSides = P + "UI.Traffic.CrewChangingSides"; // "{0}" km/h: Switch Vacate
         public const string TrafficPedestriansReason = P + "UI.Traffic.PedestriansReason"; // "{0}" = StageReason text: no car half
-        public const string BandLine = P + "UI.BandLine";                       // RESERVED for a later version: "Band {0}/{1} · {2}"
+        public const string BandLine = P + "UI.BandLine";                       // "Band {0}/{1} · {2}" (window k of N, its band lines)
+        // partial upgrade works (UI panel, tooltips; helpers below map the enums to these keys)
+        public const string UpgradeKindWidening = P + "UI.Upgrade.Kind.Widening";
+        public const string UpgradeKindNarrowing = P + "UI.Upgrade.Kind.Narrowing";
+        public const string UpgradeKindRemark = P + "UI.Upgrade.Kind.Remark";
+        public const string UpgradeKindMixed = P + "UI.Upgrade.Kind.Mixed";
+        public const string UpgradeBandLeft = P + "UI.Upgrade.Band.Left";
+        public const string UpgradeBandRight = P + "UI.Upgrade.Band.Right";
+        public const string UpgradeBandMiddle = P + "UI.Upgrade.Band.Middle";
+        public const string UpgradeBandMarkings = P + "UI.Upgrade.Band.Markings";
+        public const string UpgradeBandPhase = P + "UI.Upgrade.BandPhase";         // "{0} · {1} · {2}%" (band, phase name, percent)
+        public const string UpgradeTrafficLaneDrop = P + "UI.Upgrade.Traffic.LaneDrop";   // "{0}" km/h
+        public const string UpgradeTrafficOneWay = P + "UI.Upgrade.Traffic.OneWay";
+        public const string UpgradeTrafficUnaffected = P + "UI.Upgrade.Traffic.Unaffected";
+        public const string UpgradeTrafficDressing = P + "UI.Upgrade.Traffic.Dressing";   // "{0}" = reason text
+        public const string UpgradeTrafficNoLaneClosure = P + "UI.Upgrade.Traffic.NoLaneClosure";
+        public const string UpgradeTipWidening = P + "Tooltip.Upgrade.Widening";   // "{0}" hours, "{1}" traffic text
+        public const string UpgradeTipNarrowing = P + "Tooltip.Upgrade.Narrowing"; // "{0}" hours
+        public const string UpgradeTipRemark = P + "Tooltip.Upgrade.Remark";       // "{0}" hours
+        public const string UpgradeTipMixed = P + "Tooltip.Upgrade.Mixed";         // "{0}" hours, "{1}" traffic text
+        public const string UpgradeTipTrafficDrop = P + "Tooltip.Upgrade.Traffic.Drop";
+        public const string UpgradeTipTrafficOneWay = P + "Tooltip.Upgrade.Traffic.OneWay";
+        public const string UpgradeTipTrafficSlow = P + "Tooltip.Upgrade.Traffic.Slow";
+        public const string UpgradeTipTrafficClosed = P + "Tooltip.Upgrade.Traffic.Closed";
+        public const string UpgradeTipFullRebuild = P + "Tooltip.Upgrade.FullRebuild"; // "{0}" hours, "{1}" = StructuralKey text
+        public const string UpgradeTipTrafficUnaffected = P + "Tooltip.Upgrade.Traffic.Unaffected"; // None / Sidewalk windows
+        // Tooltip lines with the hours unit inside the template: "{0}" = the hours NUMBER (no unit), "{1}" = the traffic word
+        // (UpgradeTipTrafficKey) or, for the full rebuild, the StructuralKey text. UpgradeTipHoursKey picks one per class.
+        public const string UpgradeTipHoursWidening = P + "Tooltip.Upgrade.Hours.Widening";
+        public const string UpgradeTipHoursNarrowing = P + "Tooltip.Upgrade.Hours.Narrowing";
+        public const string UpgradeTipHoursRemark = P + "Tooltip.Upgrade.Hours.Remark";
+        public const string UpgradeTipHoursMixed = P + "Tooltip.Upgrade.Hours.Mixed";
+        public const string UpgradeTipHoursFullRebuild = P + "Tooltip.Upgrade.Hours.FullRebuild";
+        public const string UpgradeBulldoze = P + "Tooltip.Upgrade.Bulldoze";      // "{0}" refund
+        public const string UpgradeReverted = P + "UI.Upgrade.Reverted";
+        public const string UpgradeEnded = P + "UI.Upgrade.Ended";
+        public const string UpgradeTrafficClosed = P + "UI.Upgrade.Traffic.Closed";       // Carriageway window
+        public const string UpgradeTrafficSidewalk = P + "UI.Upgrade.Traffic.Sidewalk";   // Sidewalk window
+        public const string UpgradeTrafficSwitching = P + "UI.Upgrade.Traffic.Switching"; // a window switch runs (Vacate .. Ready)
+        public const string UpgradeWindowLine = P + "UI.Upgrade.WindowLine";             // "Step {0} of {1}"
+        public const string UpgradeSetup = P + "UI.Upgrade.Setup";                       // setup share (window -1)
+        public const string UpgradeTeardown = P + "UI.Upgrade.Teardown";                 // teardown share (window N)
+        public static string StructuralKey(UpgradeStructural r) => P + "UI.Upgrade.Structural." + r;
+
+        // Kind line of an upgrade project ("Widening", "Removing lanes", "Re-marking", "Rebuilding lanes"); null for other classes.
+        public static string UpgradeKindKey(UpgradeClass c)
+        {
+            switch (c)
+            {
+                case UpgradeClass.Widen: return UpgradeKindWidening;
+                case UpgradeClass.Narrow: return UpgradeKindNarrowing;
+                case UpgradeClass.Remark: return UpgradeKindRemark;
+                case UpgradeClass.Mixed: return UpgradeKindMixed;
+                default: return null;
+            }
+        }
+
+        // Band name of a band line ("Left side", "Right side", "Middle", "Markings"); chain-frame side.
+        public static string UpgradeBandKey(BandKind k, BandSide s)
+        {
+            if (k == BandKind.Remark) return UpgradeBandMarkings;
+            return s == BandSide.Left ? UpgradeBandLeft : s == BandSide.Right ? UpgradeBandRight : UpgradeBandMiddle;
+        }
+
+        // Traffic line of a window primitive (UpgradeTrafficLaneDrop takes the work-zone speed, UpgradeTrafficDressing the reason
+        // text PhasePlan.StageReasonKey(UpgradeView.Reason)).
+        public static string UpgradeTrafficKey(BandTraffic t)
+        {
+            switch (t)
+            {
+                case BandTraffic.Drop: return UpgradeTrafficLaneDrop;
+                case BandTraffic.Half: return UpgradeTrafficOneWay;
+                case BandTraffic.Carriageway: return UpgradeTrafficClosed;
+                case BandTraffic.Sidewalk: return UpgradeTrafficSidewalk;
+                case BandTraffic.None: return UpgradeTrafficUnaffected;
+                default: return UpgradeTrafficDressing;
+            }
+        }
+
+        // Tooltip traffic word of the weakest expected primitive ("outer lanes closed", "one direction at a time", "traffic not
+        // affected" for None / Sidewalk, "slow zone" for Dressing and undecided).
+        public static string UpgradeTipTrafficKey(BandTraffic t)
+        {
+            switch (t)
+            {
+                case BandTraffic.Drop: return UpgradeTipTrafficDrop;
+                case BandTraffic.Half: return UpgradeTipTrafficOneWay;
+                case BandTraffic.Carriageway: return UpgradeTipTrafficClosed;
+                case BandTraffic.None:
+                case BandTraffic.Sidewalk: return UpgradeTipTrafficUnaffected;
+                default: return UpgradeTipTrafficSlow;
+            }
+        }
+
+        // Tooltip line of a classified upgrade with the hours unit in the template: Format(key, hoursNumber, trafficWord); the
+        // full rebuild (any other class) takes the StructuralKey text as {1}.
+        public static string UpgradeTipHoursKey(UpgradeClass c)
+        {
+            switch (c)
+            {
+                case UpgradeClass.Widen: return UpgradeTipHoursWidening;
+                case UpgradeClass.Narrow: return UpgradeTipHoursNarrowing;
+                case UpgradeClass.Remark: return UpgradeTipHoursRemark;
+                case UpgradeClass.Mixed: return UpgradeTipHoursMixed;
+                default: return UpgradeTipHoursFullRebuild;
+            }
+        }
+
+        // Tooltip of a classified upgrade ({0} hours text, {1} traffic word where the text has one).
+        public static string UpgradeTipKey(UpgradeClass c)
+        {
+            switch (c)
+            {
+                case UpgradeClass.Widen: return UpgradeTipWidening;
+                case UpgradeClass.Narrow: return UpgradeTipNarrowing;
+                case UpgradeClass.Remark: return UpgradeTipRemark;
+                case UpgradeClass.Mixed: return UpgradeTipMixed;
+                default: return UpgradeTipFullRebuild;
+            }
+        }
 
         public static readonly Dictionary<string, string> English = new Dictionary<string, string>
         {
@@ -427,6 +558,54 @@ namespace RealisticRoadWorks.V3
             { TrafficCrewChangingSides, "One direction open at {0} km/h · crew clearing the other side before the switch" },
             { TrafficPedestriansReason, "Closed to vehicles – sidewalks open ({0})" },
             { BandLine, "Band {0}/{1} · {2}" },
+            { UpgradeKindWidening, "Widening" },
+            { UpgradeKindNarrowing, "Removing lanes" },
+            { UpgradeKindRemark, "Re-marking" },
+            { UpgradeKindMixed, "Rebuilding lanes" },
+            { UpgradeBandLeft, "Left side" },
+            { UpgradeBandRight, "Right side" },
+            { UpgradeBandMiddle, "Middle" },
+            { UpgradeBandMarkings, "Markings" },
+            { UpgradeBandPhase, "{0} · {1} · {2}%" },
+            { UpgradeTrafficLaneDrop, "Outer lanes closed · traffic keeps flowing at {0} km/h" },
+            { UpgradeTrafficOneWay, "One direction closed · detour signed" },
+            { UpgradeTrafficUnaffected, "Traffic not affected · sidewalk fenced" },
+            { UpgradeTrafficDressing, "Slow zone · {0}" },
+            { UpgradeTrafficNoLaneClosure, "Lanes cannot be closed here · slow zone, no machines in the lanes" },
+            { UpgradeTipWidening, "Widening ≈ {0} · {1}" },
+            { UpgradeTipNarrowing, "Removing lanes ≈ {0} · traffic not affected" },
+            { UpgradeTipRemark, "Re-marking ≈ {0} · one direction at a time" },
+            { UpgradeTipMixed, "Rebuilding lanes ≈ {0} · {1}" },
+            { UpgradeTipTrafficDrop, "outer lanes closed" },
+            { UpgradeTipTrafficOneWay, "one direction at a time" },
+            { UpgradeTipTrafficSlow, "slow zone" },
+            { UpgradeTipTrafficClosed, "road closes" },
+            { UpgradeTipFullRebuild, "Full rebuild ≈ {0} · {1}" },
+            { UpgradeTipTrafficUnaffected, "traffic not affected" },
+            { UpgradeTipHoursWidening, "Widening ≈ {0} h · {1}" },
+            { UpgradeTipHoursNarrowing, "Removing lanes ≈ {0} h · {1}" },
+            { UpgradeTipHoursRemark, "Re-marking ≈ {0} h · {1}" },
+            { UpgradeTipHoursMixed, "Rebuilding lanes ≈ {0} h · {1}" },
+            { UpgradeTipHoursFullRebuild, "Full rebuild ≈ {0} h · {1}" },
+            { UpgradeBulldoze, "Road will be demolished · refund {0}" },
+            { UpgradeReverted, "Upgrade undone · nothing to build" },
+            { UpgradeEnded, "Upgrade works ended: road demolished" },
+            { UpgradeTrafficClosed, "Road closed for the works · sidewalks open" },
+            { UpgradeTrafficSidewalk, "Sidewalk closed on one side · traffic not affected" },
+            { UpgradeTrafficSwitching, "Changing work area: waiting for vehicles to clear" },
+            { UpgradeWindowLine, "Step {0} of {1}" },
+            { UpgradeSetup, "Setting up the works" },
+            { UpgradeTeardown, "Clearing the site" },
+            { StructuralKey(UpgradeStructural.Elevation), "bridge or tunnel" },
+            { StructuralKey(UpgradeStructural.Track), "tram tracks change" },
+            { StructuralKey(UpgradeStructural.Wall), "retaining wall changes" },
+            { StructuralKey(UpgradeStructural.Geometry), "road moves" },
+            { StructuralKey(UpgradeStructural.Bands), "too many changes at once" },
+            { StructuralKey(UpgradeStructural.Unreadable), "unknown road layout" },
+            { StructuralKey(UpgradeStructural.Policy), "full rebuild setting" },
+            { PhasePlan.StageReasonKey(StageBlockReason.Drop), "lane closures not available" },
+            { PhasePlan.StageReasonKey(StageBlockReason.Houses), "houses along the road" },
+            { PhasePlan.StageReasonKey(StageBlockReason.Waiting), "waiting for traffic data" },
             { PhasePlan.StageReasonKey(StageBlockReason.DeadEnd), "dead end" },
             { PhasePlan.StageReasonKey(StageBlockReason.Track), "tram tracks" },
             { PhasePlan.StageReasonKey(StageBlockReason.Stop), "bus stop" },

@@ -41,6 +41,8 @@ namespace RealisticRoadWorks.V3.Surfaces
 
         // ------------------------------------------------------------------ classification
 
+        // Upgrade works (HalfWidth) are never mode-A works edges: their road stays visible, so their junction ends clip to the
+        // edge geometry and never get a node cap.
         static bool IsModeAWorksEdge(EntityManager em, Entity e)
         {
             if (!SiteRegistry.Edges.ContainsKey(e) || !em.HasComponent<RoadWorksSite>(e)) return false;
@@ -58,13 +60,15 @@ namespace RealisticRoadWorks.V3.Surfaces
             return new float3(d.x, 0f, d.y);
         }
 
-        public static EndKind ClassifyEnd(EntityManager em, Entity edge, Entity node, out float3 cut)
+        // openRoad: the edge's own road stays visible and in use (upgrade works): a dead end is clipped to the edge geometry
+        // (OpenDeadEnd) instead of getting the round cap a hidden works road needs over its cul-de-sac.
+        public static EndKind ClassifyEnd(EntityManager em, Entity edge, Entity node, bool openRoad, out float3 cut)
         {
             cut = float3.zero;
             if (!EcsUtil.Alive(em, node)) return EndKind.Visible;
             EcsUtil.ConnectedEdges(em, node, s_Conn);
             int n = s_Conn.Count;
-            if (n <= 1) return EndKind.DeadEnd;
+            if (n <= 1) return openRoad ? EndKind.OpenDeadEnd : EndKind.DeadEnd;
             bool allWorks = true;
             for (int i = 0; i < n; i++)
                 if (!IsModeAWorksEdge(em, s_Conn[i])) { allWorks = false; break; }
@@ -124,7 +128,9 @@ namespace RealisticRoadWorks.V3.Surfaces
             switch (ends.Start)
             {
                 case EndKind.Visible:
-                    // never paint on a finished intersection: clip every piece to the edge geometry, fronts included
+                case EndKind.OpenDeadEnd:
+                    // never paint on a finished intersection (or the cul-de-sac of a road that stays in use): clip every piece to
+                    // the edge geometry, fronts included
                     gs0 = math.max(ls0, ends.TrimStart);
                     taperStart = roads;
                     break;
@@ -142,6 +148,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             switch (ends.End)
             {
                 case EndKind.Visible:
+                case EndKind.OpenDeadEnd:
                     gs1 = math.min(ls1, L - ends.TrimEnd);
                     taperEnd = roads;
                     break;
