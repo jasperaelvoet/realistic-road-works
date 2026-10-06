@@ -1,5 +1,7 @@
 # Realistic Road Works
 
+[Paradox Mods](https://mods.paradoxplaza.com/mods/162194/Windows) · [Latest release](https://github.com/jasperaelvoet/realistic-road-works/releases/latest) · [Showcase video](https://github.com/jasperaelvoet/realistic-road-works/releases/download/v3.0.0/realistic-road-works-showcase.mp4)
+
 A code mod for Cities: Skylines II that turns road building into real road works. A new road does not appear the moment you
 release the mouse. It is surveyed, dug out, given a gravel foundation, paved and marked, with the trench in the actual terrain and
 excavators, dump trucks, rollers, a paver and a line painter working at believable speeds. Bulldozing a road starts a demolition
@@ -137,7 +139,8 @@ animated machines per crew, and High adds the rest.
 
 ### Paradox Mods
 
-Coming soon. Until then, install it manually (below).
+Subscribe on [Paradox Mods](https://mods.paradoxplaza.com/mods/162194/Windows) (in game: Paradox Mods > search "Realistic Road Works").
+New versions are published there automatically from GitHub releases.
 
 ### Manual
 
