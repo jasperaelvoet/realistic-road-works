@@ -138,3 +138,26 @@ Publishing uses route A. The toolchain's mod publisher reads `Properties/Publish
    or use Publish in Visual Studio or Rider and pick the profile.
 
 The publisher uploads with the Paradox account the game is logged in to, so log in from the game once before you publish.
+
+### From GitHub Actions
+
+`.github/workflows/paradox-mods.yml` builds the mod on a GitHub-hosted Linux runner and uploads it with the game's Mod Publisher
+(a .NET 6 program that runs anywhere with `dotnet ModPublisher.dll`).
+
+- **New version:** bump `ModVersion` and `ChangeLog` in `Properties/PublishConfiguration.xml`, then publish a GitHub release whose tag
+  is `v` plus that version (for example `v3.0.1`). The workflow builds and uploads the new version.
+- **Manual runs** (Actions > Publish to Paradox Mods > Run workflow) offer `Publish` (first upload; the returned mod id is committed
+  into the configuration), `NewVersion` and `Update` (metadata only). Manual runs are dry runs unless you untick `dry_run`: they
+  build, validate the configuration and keep the staged content as an artifact.
+
+The runner needs files from the game, which are not in this repository: the game's `Cities2_Data/Managed` libraries and the Mod
+Publisher. The workflow checks them out from a private repository (`DEPS_REPOSITORY` in the workflow) with a read-only deploy key.
+Secrets, set in the `paradox-mods` environment (usable only from `main` and `v*` tags):
+
+| Secret | Value |
+|---|---|
+| `CI_DEPS_DEPLOY_KEY` | Private SSH key of the read-only deploy key on the private dependencies repository |
+| `PDX_EMAIL` | Email of the Paradox account that owns the mod |
+| `PDX_PASSWORD` | Its password. Accounts with two-factor login cannot log in from a runner. |
+
+After a game update, refresh the two folders in the private repository so the build uses the current game libraries.

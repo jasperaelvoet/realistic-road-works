@@ -1,0 +1,174 @@
+name: Publish to Paradox Mods
+
+# Builds the mod (release, without DevTools) on a GitHub-hosted runner and uploads it with the game's own Mod Publisher.
+#
+#  - Publishing a GitHub release (tag vX.Y.Z) uploads a new version of the existing mod (ModPublisher NewVersion).
+#  - "Run workflow" (manual) offers:
+#      Publish     first upload of a new mod; the returned id is written to Properties/PublishConfiguration.xml and committed
+#      NewVersion  new build of the existing mod (needs ModId and ChangeLog in the configuration)
+#      Update      metadata only (descriptions, thumbnail, screenshots, tags, links)
+#    Manual runs are dry runs unless "dry_run" is unticked: they build, validate and stage the content without uploading.
+#
+# Required secrets (environment "paradox-mods"):
+#   PDX_EMAIL, PDX_PASSWORD   Paradox account that owns the mod (accounts with two-factor login cannot log in headless)
+#   CI_DEPS_DEPLOY_KEY        read-only deploy key of the private repository with the game libraries and the Mod Publisher
+# The game's files are never part of this repository; see docs/BUILDING.md.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Publish = first upload, NewVersion = new build of the existing mod, Update = metadata only"
+        type: choice
+        options: [NewVersion, Update, Publish]
+        default: NewVersion
+      dry_run:
+        description: "Build and validate only, upload nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # only used to commit the mod id after a first upload
+
+concurrency:
+  group: paradox-mods
+  cancel-in-progress: false
+
+env:
+  DEPS_REPOSITORY: jasperaelvoet/realistic-road-works-ci-deps
+  PUBLISH_CONFIG: Properties/PublishConfiguration.xml
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: paradox-mods
+    steps:
+      - name: Check out the mod
+        uses: actions/checkout@v7
+
+      - name: Check out the game libraries and the Mod Publisher (private)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.DEPS_REPOSITORY }}
+          ssh-key: ${{ secrets.CI_DEPS_DEPLOY_KEY }}
+          path: .ci-deps
+          persist-credentials: false
+
+      - name: Set up .NET (SDK 8 for the build, runtime 6 for the Mod Publisher)
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            6.0.x
+
+      - name: Decide what to do
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_COMMAND: ${{ inputs.command }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          read_value() { python3 - "$PUBLISH_CONFIG" "$1" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          el = root.find(sys.argv[2])
+          print((el.get("Value") if el is not None and el.get("Value") is not None else (el.text or "") if el is not None else "").strip())
+          PY
+          }
+          mod_id="$(read_value ModId)"; mod_version="$(read_value ModVersion)"
+          if [ "$EVENT" = "release" ]; then
+            command=NewVersion; dry=false
+            if [ "${TAG#v}" != "$mod_version" ]; then
+              echo "::error::Release tag $TAG does not match ModVersion $mod_version in $PUBLISH_CONFIG"; exit 1
+            fi
+          else
+            command="$INPUT_COMMAND"; dry="$INPUT_DRY_RUN"
+          fi
+          if [ "$command" = "Publish" ] && [ -n "$mod_id" ]; then
+            echo "::error::ModId is already set ($mod_id): use NewVersion or Update"; exit 1
+          fi
+          if [ "$command" != "Publish" ] && [ -z "$mod_id" ]; then
+            echo "::error::ModId is empty: run this workflow manually with command Publish first"; exit 1
+          fi
+          echo "command=$command" >> "$GITHUB_OUTPUT"
+          echo "dry=$dry" >> "$GITHUB_OUTPUT"
+          echo "### Paradox Mods: $command (dry run: $dry), version $mod_version, mod id ${mod_id:-new}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Game libraries: $(cat .ci-deps/GAME_VERSION 2>/dev/null || echo unknown)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate the publish configuration
+        run: |
+          python3 - "$PUBLISH_CONFIG" <<'PY'
+          import os, re, sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          val = lambda tag: [((e.get("Value") or e.text or "").strip()) for e in root.findall(tag)]
+          errors = []
+          for tag in ["DisplayName", "ShortDescription", "LongDescription", "Thumbnail", "ModVersion", "GameVersion", "ChangeLog"]:
+              if not any(val(tag)):
+                  errors.append(f"{tag} is empty")
+          for path in val("Thumbnail") + val("Screenshot"):
+              if path and not os.path.isfile(path):
+                  errors.append(f"missing file {path}")
+          if not re.fullmatch(r"\d+\.\d+\.\d+", (val("ModVersion") or [""])[0]):
+              errors.append("ModVersion must look like 1.2.3")
+          if (val("AccessLevel") or ["Public"])[0] not in ("Public", "Unlisted", "Private"):
+              errors.append("AccessLevel must be Public, Unlisted or Private")
+          for e in errors:
+              print(f"::error::{e}")
+          sys.exit(1 if errors else 0)
+          PY
+
+      - name: Build (release, without DevTools)
+        run: dotnet build RealisticRoadWorks.csproj -c Release -p:GameManagedDir="$GITHUB_WORKSPACE/.ci-deps/managed" -o out
+
+      - name: Stage the mod content
+        run: |
+          set -euo pipefail
+          rm -rf content && mkdir content
+          cp out/RealisticRoadWorks.dll out/RealisticRoadWorks.mjs content/
+          ls -la content
+
+      - name: Keep the staged content
+        uses: actions/upload-artifact@v7
+        with:
+          name: RealisticRoadWorks-paradox-mods-content
+          path: content/
+          if-no-files-found: error
+
+      - name: Upload to Paradox Mods
+        id: upload
+        if: steps.plan.outputs.dry != 'true'
+        env:
+          PDX_EMAIL: ${{ secrets.PDX_EMAIL }}
+          PDX_PASSWORD: ${{ secrets.PDX_PASSWORD }}
+          COMMAND: ${{ steps.plan.outputs.command }}
+          DOTNET_ROLL_FORWARD: Major
+        run: |
+          set -euo pipefail
+          if [ -z "${PDX_EMAIL:-}" ] || [ -z "${PDX_PASSWORD:-}" ]; then
+            echo "::error::PDX_EMAIL / PDX_PASSWORD secrets are not set in the paradox-mods environment"; exit 1
+          fi
+          dotnet .ci-deps/ModPublisher/ModPublisher.dll "$COMMAND" "$PUBLISH_CONFIG" -c content \
+            --noAutoLogin -e "$PDX_EMAIL" -p "$PDX_PASSWORD" -v 2>&1 | tee publish.log
+          id="$(grep -oE 'Mod published with Id=[0-9]+' publish.log | grep -oE '[0-9]+$' || true)"
+          echo "mod_id=$id" >> "$GITHUB_OUTPUT"
+          echo "Uploaded: $COMMAND${id:+ (new mod id $id)}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Store the new mod id
+        if: steps.plan.outputs.command == 'Publish' && steps.upload.outputs.mod_id != ''
+        env:
+          MOD_ID: ${{ steps.upload.outputs.mod_id }}
+        run: |
+          set -euo pipefail
+          sed -i -E "s|<ModId Value=\"[^\"]*\" */>|<ModId Value=\"$MOD_ID\" />|" "$PUBLISH_CONFIG"
+          grep -q "<ModId Value=\"$MOD_ID\"" "$PUBLISH_CONFIG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$PUBLISH_CONFIG"
+          git commit -m "Paradox Mods: store mod id $MOD_ID"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

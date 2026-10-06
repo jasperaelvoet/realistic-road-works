@@ -56,7 +56,7 @@ Source code and issue tracker: https://github.com/jasperaelvoet/realistic-road-w
 	<!--Version of the mod-->
 	<ModVersion Value="3.0.0" />
 	<!--Recommended version of the base game to use the mod-->
-	<GameVersion Value="1.*" />
+	<GameVersion Value="1.6.*" />
 	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
 	<ChangeLog>
 First public release.
