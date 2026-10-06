@@ -30,7 +30,7 @@ on:
         default: true
 
 permissions:
-  contents: write   # only used to commit the mod id after a first upload
+  contents: read    # the store-mod-id job alone gets write access
 
 concurrency:
   group: paradox-mods
@@ -46,9 +46,15 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: paradox-mods
+    if: github.event_name != 'release' || !github.event.release.prerelease
+    outputs:
+      mod_id: ${{ steps.upload.outputs.mod_id }}
+      command: ${{ steps.plan.outputs.command }}
     steps:
       - name: Check out the mod
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Check out the game libraries and the Mod Publisher (private)
         uses: actions/checkout@v7
@@ -72,6 +78,7 @@ jobs:
           INPUT_COMMAND: ${{ inputs.command }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           TAG: ${{ github.event.release.tag_name }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           read_value() { python3 - "$PUBLISH_CONFIG" "$1" <<'PY'
@@ -89,6 +96,9 @@ jobs:
             fi
           else
             command="$INPUT_COMMAND"; dry="$INPUT_DRY_RUN"
+          fi
+          if [ "$command" = "Publish" ] && [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Run the first upload (Publish) from the main branch, not $REF"; exit 1
           fi
           if [ "$command" = "Publish" ] && [ -n "$mod_id" ]; then
             echo "::error::ModId is already set ($mod_id): use NewVersion or Update"; exit 1
@@ -153,16 +163,39 @@ jobs:
           if [ -z "${PDX_EMAIL:-}" ] || [ -z "${PDX_PASSWORD:-}" ]; then
             echo "::error::PDX_EMAIL / PDX_PASSWORD secrets are not set in the paradox-mods environment"; exit 1
           fi
+          case "$PDX_PASSWORD" in
+            @*) echo "::error::PDX_PASSWORD starts with '@': the Mod Publisher's argument parser would read it as a response file. Use a password that does not start with '@'."; exit 1;;
+          esac
+          rc=0
           dotnet .ci-deps/ModPublisher/ModPublisher.dll "$COMMAND" "$PUBLISH_CONFIG" -c content \
-            --noAutoLogin -e "$PDX_EMAIL" -p "$PDX_PASSWORD" -v 2>&1 | tee publish.log
+            --noAutoLogin -e "$PDX_EMAIL" -p "$PDX_PASSWORD" -v > publish.log 2>&1 || rc=$?
+          cat publish.log
+          # keep the id even if the publisher fails after creating the mod, so a rerun cannot create a duplicate
           id="$(grep -oE 'Mod published with Id=[0-9]+' publish.log | grep -oE '[0-9]+$' || true)"
           echo "mod_id=$id" >> "$GITHUB_OUTPUT"
-          echo "Uploaded: $COMMAND${id:+ (new mod id $id)}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$id" ]; then
+            echo "### New Paradox Mods id: $id (https://mods.paradoxplaza.com/mods/$id/Windows)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Mod Publisher exit code $rc ($COMMAND)" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+
+  store-mod-id:
+    # Separate job: the only one with write access, and it runs no build and no vendor code.
+    needs: publish
+    if: always() && needs.publish.outputs.command == 'Publish' && needs.publish.outputs.mod_id != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
 
       - name: Store the new mod id
-        if: steps.plan.outputs.command == 'Publish' && steps.upload.outputs.mod_id != ''
         env:
-          MOD_ID: ${{ steps.upload.outputs.mod_id }}
+          MOD_ID: ${{ needs.publish.outputs.mod_id }}
         run: |
           set -euo pipefail
           sed -i -E "s|<ModId Value=\"[^\"]*\" */>|<ModId Value=\"$MOD_ID\" />|" "$PUBLISH_CONFIG"
@@ -171,4 +204,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$PUBLISH_CONFIG"
           git commit -m "Paradox Mods: store mod id $MOD_ID"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin HEAD:main
