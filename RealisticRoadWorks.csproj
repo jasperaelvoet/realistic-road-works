@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9</LangVersion>
+    <Nullable>disable</Nullable>
+    <NoWarn>CS0649;CS0169;CS0414;MSB3277</NoWarn>
+    <!-- Compile against the game's own (Unity) core libraries: they define Span/ReadOnlySpan, which the
+         net48 reference assemblies lack and which Unity.Entities overloads need. -->
+    <FrameworkPathOverride Condition="'$(GameManagedDir)' != ''">$(GameManagedDir)</FrameworkPathOverride>
+    <AssemblyName>RealisticRoadWorks</AssemblyName>
+    <Configurations>Debug;Release</Configurations>
+    
+    <DefineConstants Condition="'$(DevTools)' == 'true'">$(DefineConstants);DEVTOOLS</DefineConstants>
+    <PublishConfigurationPath>Properties\PublishConfiguration.xml</PublishConfigurationPath>
+    <!-- Official toolchain (Windows) sets CSII_TOOLPATH. Otherwise pass -p:GameManagedDir=".../Cities2_Data/Managed" -->
+    <CSIIToolPath>$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH'))</CSIIToolPath>
+  </PropertyGroup>
+
+  <Import Project="$(CSIIToolPath)\Mod.props" Condition="'$(CSIIToolPath)' != ''" />
+  <Import Project="$(CSIIToolPath)\Mod.targets" Condition="'$(CSIIToolPath)' != ''" />
+
+  <ItemGroup>
+    <!-- The dev harness only builds with -p:DevTools=true. -->
+    <Compile Remove="Dev/**;Src/Dev/**" Condition="'$(DevTools)' != 'true'" />
+    <Compile Remove="bin/**;obj/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The info panel UI module ships next to the DLL (the game loads <Mod>.mjs from the mod folder). -->
+    <None Include="UI/RealisticRoadWorks.mjs" Link="RealisticRoadWorks.mjs" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <GameRef Include="netstandard;Game;Colossal.Core;Colossal.Logging;Colossal.IO.AssetDatabase;Colossal.Mathematics;Colossal.Collections;Colossal.Localization;Colossal.UI.Binding;UnityEngine.CoreModule;Unity.Burst;Unity.Collections;Unity.Entities;Unity.Mathematics;UnityEngine.AudioModule;UnityEngine.VFXModule;Unity.VisualEffectGraph.Runtime;Unity.RenderPipelines.HighDefinition.Runtime;Unity.RenderPipelines.Core.Runtime;Colossal.AssetPipeline;Colossal.PSI.Common" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(CSIIToolPath)' != ''">
+    <Reference Include="@(GameRef)"><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(CSIIToolPath)' == ''">
+    <Reference Include="@(GameRef)"><HintPath>$(GameManagedDir)/%(Identity).dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

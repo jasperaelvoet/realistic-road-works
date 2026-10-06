@@ -1,0 +1,73 @@
+<Publish>
+	<!--Id must be set in order to update an existing mod. Leave it empty for the first upload, then paste the id Paradox Mods returns.-->
+	<ModId Value="" />
+	<!--Name of the mod to display to players-->
+	<DisplayName Value="Realistic Road Works" />
+	<!--Short description of the mod-->
+	<ShortDescription Value="Roads take time to build and demolish, with a real trench, working machines, closures and staged opening." />
+	<!--Long description of the mod. Single line or multi line. Supports minimal markdown subset-->
+	<LongDescription>
+Road building becomes real road works. A new road no longer appears the moment you release the mouse: it is surveyed, dug out, given a gravel foundation, paved and marked, while machines work at believable speeds. Bulldozing a road starts a demolition that breaks it up, removes the road bed and restores the ground.
+
+**Construction**
+- Roads take in-game time (48 working hours per km by default, at least 6 hours). Crews work around the clock.
+- Five visible phases: survey &amp; clearing, excavation, foundation, paving, markings &amp; finishing.
+- A real trench is dug into the terrain, with dirt, gravel and fresh asphalt textures.
+- Long roads are split into sections, each with its own crew.
+
+**Demolition**
+- Breaking up, removing the road bed and restoring the ground to its original shape.
+- Bulldozing a new road that has only just been started removes it at once with a full refund.
+
+**Machines**
+- Excavators really dig and load dump trucks bucket by bucket.
+- A grading excavator spreads the gravel, tandem rollers compact the base and the asphalt, and a paver and a line painter finish the road.
+- Realistic speeds, no driving through each other, work lights at night.
+
+**Traffic**
+- Sites are closed and traffic reroutes. The road opens only after every machine has left.
+- Staged opening: sidewalks open from paving, then one direction opens during the markings with yellow temporary lines, fences, cones, signs and blinking beacons.
+
+**Interface**
+- A Road works panel with phases, progress, finish time, crews, traffic status, cost and refund, and Rush, Cancel and Show work front buttons.
+- Tooltips with the expected work time while you draw or bulldoze roads.
+
+**Save safe**
+- Only one small component per road segment is saved. Without the mod, a save loads with normal, open roads.
+- Uses only the game's own assets.
+
+Known limitations: elevated roads, bridges and tunnels get a simple site without a trench. Every car lane in the game is one-way, so there is no alternating traffic light.
+
+Source code and issue tracker: https://github.com/jasperaelvoet/realistic-road-works
+	</LongDescription>
+	<!--Thumbnail-->
+	<Thumbnail Value="Properties/Thumbnail.png" />
+	<!--Screenshot, can be set multiple times. Every listed file must exist when publishing.-->
+	<Screenshot Value="Properties/Screenshots/01.jpg" />
+	<Screenshot Value="Properties/Screenshots/02.jpg" />
+	<Screenshot Value="Properties/Screenshots/03.jpg" />
+	<Screenshot Value="Properties/Screenshots/04.jpg" />
+	<Screenshot Value="Properties/Screenshots/05.jpg" />
+	<Screenshot Value="Properties/Screenshots/06.jpg" />
+	<!--Tag, can be set multiple times. Values must match the tag list on Paradox Mods.-->
+	<Tag Value="Code Mod" />
+	<!--Link to the forum post where the mod can be discussed-->
+	<ForumLink Value="" />
+	<!--Version of the mod-->
+	<ModVersion Value="3.0.0" />
+	<!--Recommended version of the base game to use the mod-->
+	<GameVersion Value="1.*" />
+	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
+	<ChangeLog>
+First public release.
+- Roads take time to build and demolish, with five construction phases and three demolition phases.
+- Real terrain trench, ground textures, excavators with an IK dig cycle, dump trucks, rollers, a paver and a line painter.
+- Multiple crews on long roads, realistic machine speeds.
+- Closures with rerouting, staged opening with yellow temporary lines, fences, signs and beacons.
+- Road works info panel, tooltips and settings.
+	</ChangeLog>
+	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
+	<ExternalLink Type="github" Url="https://github.com/jasperaelvoet/realistic-road-works" />
+	<!--Supported values Public, Private, Unlisted-->
+	<AccessLevel Value="Public" />
+</Publish>

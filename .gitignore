@@ -1,0 +1,18 @@
+# Build output
+bin/
+obj/
+
+# IDE and user files
+*.user
+.vs/
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
+
+# Private working material (findings, notes, scripts, raw media) - never published
+private/
