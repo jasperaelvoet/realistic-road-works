@@ -396,6 +396,7 @@ namespace RealisticRoadWorks.V3.Director
 
             int stampW = -1;
             var stampPrim = BandTraffic.Undecided;
+            bool shuttleSignals = ShuttleSignalsPossible(em, proj);
             bool dropsGone = false;
             string dropsWhy = null;
             var layoutBlock = StageBlockReason.None;
@@ -406,6 +407,12 @@ namespace RealisticRoadWorks.V3.Director
                 bool started = k0 >= 0 && w <= math.min(k0, N - 1);
                 var closed = rt.HalfClosesOf(w, input.RemarkWindow && ps.UwSwapOn);
                 input.EveryDirectionKeepsLane = KeepsLaneEveryEdge(proj, w);
+                input.RemarkTwoWay = input.RemarkWindow && RemarkTwoWayEveryEdge(proj, w, rt.AllAtOnce);
+                if (shuttleSignals && !buildings)
+                {
+                    if (input.RemarkWindow) input.RemarkShuttleOK = !input.RemarkTwoWay && RemarkShuttleEveryEdge(proj, w, rt.AllAtOnce);
+                    else input.ShuttleOK = !input.EveryDirectionKeepsLane && ShuttleEveryEdge(proj, w, rt.AllAtOnce);
+                }
                 input.Buildings = buildings;
                 input.SideBuildings = (houses & BandSidewalks(rt, w)) != RoadZones.None;
                 input.CarHalfBlock = closed == RoadZones.None ? StageBlockReason.None : UpgradeHalfBlock(proj, closed, input.RemarkWindow, chainBlock);
@@ -441,6 +448,9 @@ namespace RealisticRoadWorks.V3.Director
                 rt.Primitive[w] = prim;
                 rt.WindowReason[w] = why;
                 rt.Zones[w] = PhasePlan.WindowZones(prim, rt.Bands, w);
+                // the sidewalk of a build band is built too: closed with the window where no building opens onto it
+                if (prim == BandTraffic.Drop || prim == BandTraffic.Half || prim == BandTraffic.Carriageway)
+                    rt.Zones[w] |= BandSidewalks(rt, w) & ~houses;
                 if (started && w == lw && k0 < N && rt.Saved[w] == BandTraffic.Undecided) { stampW = w; stampPrim = prim; }
                 if (rt.AllAtOnce && input.HasBuild && w >= lw && prim != BandTraffic.Drop && !dropsGone)
                 {
@@ -481,6 +491,49 @@ namespace RealisticRoadWorks.V3.Director
                 else z |= RoadZones.Sidewalks;
             }
             return z;
+        }
+
+        // One-lane alternating operation needs portable signals at both ends of a short single chain whose end nodes have no
+        // traffic lights of their own (the game's lights would overrule ours).
+        private static bool ShuttleSignalsPossible(EntityManager em, ProjectRecord proj) => UpgradeShuttle.SignalsPossible(em, proj.Edges);
+
+        private static bool ShuttleEveryEdge(ProjectRecord proj, int w, bool aao)
+        {
+            bool any = false;
+            int n = 0;
+            for (int i = 0; i < proj.Edges.Count; i++)
+            {
+                if (!SiteRegistry.TryGetEdge(proj.Edges[i], out var rec) || rec.Upgrade == null) continue;
+                if (!rec.Upgrade.KeepsTraffic(w, aao, out bool shared)) return false;
+                any |= shared;
+                n++;
+            }
+            return n > 0 && any;
+        }
+
+        private static bool RemarkShuttleEveryEdge(ProjectRecord proj, int w, bool aao)
+        {
+            int n = 0;
+            for (int i = 0; i < proj.Edges.Count; i++)
+            {
+                if (!SiteRegistry.TryGetEdge(proj.Edges[i], out var rec) || rec.Upgrade == null) continue;
+                if (!rec.Upgrade.RemarkShuttle(w, aao)) return false;
+                n++;
+            }
+            return n > 0;
+        }
+
+        // On every upgrade edge both directions fit on temporary lanes over either half of the re-marking window w.
+        private static bool RemarkTwoWayEveryEdge(ProjectRecord proj, int w, bool aao)
+        {
+            int n = 0;
+            for (int i = 0; i < proj.Edges.Count; i++)
+            {
+                if (!SiteRegistry.TryGetEdge(proj.Edges[i], out var rec) || rec.Upgrade == null) continue;
+                if ((rec.BuildingCount > 0) || !rec.Upgrade.RemarkTwoWay(w, aao)) return false;
+                n++;
+            }
+            return n > 0;
         }
 
         // On every upgrade edge each direction keeps a drive lane outside the build bands of window w (false without any edge).

@@ -21,6 +21,10 @@ namespace RealisticRoadWorks.V3
         public bool ClosedBGate;             // a direction next to buildings may close (RRWGates.ClosedB)
         public BandTraffic Saved;            // primitive saved at the window start (Undecided before it)
         public bool CutEdge;                 // an edge of the chain is a cut edge (EdgeRecord.CutEdge): the carriageway never closes
+        public bool RemarkTwoWay;            // re-marking window: on every edge both directions fit on temporary lanes over the open half
+        public bool ShuttleOK;               // build window: every edge keeps a lane per direction or one shared lane, and the section
+                                             // can be signalled (one-lane alternating operation with portable signals)
+        public bool RemarkShuttleOK;         // re-marking window: one shared lane on the open half of every edge, signals possible
     }
 
     // One sub-strip's traffic state for the machine-safety test. Pure data.
@@ -149,8 +153,10 @@ namespace RealisticRoadWorks.V3
             switch (r)
             {
                 case BandTraffic.Drop:
-                    return !w.RemarkWindow && w.DropGate && w.EveryDirectionKeepsLane && !w.Buildings;
+                    return !w.RemarkWindow && w.DropGate && (w.EveryDirectionKeepsLane || w.ShuttleOK) && !w.Buildings;
                 case BandTraffic.Half:
+                    // re-marking with temporary lanes: both directions keep driving on the open half, no detour needed
+                    if (w.RemarkWindow && (w.RemarkTwoWay || w.RemarkShuttleOK) && !w.CorridorConflict && (!w.Buildings || w.ClosedBGate)) return true;
                     return (w.RemarkWindow || !w.BothSides) && w.CarHalfBlock == StageBlockReason.None && w.DetourExists
                            && !w.CorridorConflict && (!w.Buildings || w.ClosedBGate);
                 case BandTraffic.Carriageway:

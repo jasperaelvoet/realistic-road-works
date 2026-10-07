@@ -373,7 +373,12 @@ namespace RealisticRoadWorks.V3
         public const float kUwBandMachineClear = 0.25f;  // machines keep this far from an open lane edge
         public const float kUwFenceClear = 0.30f;        // ... and this far from a fence side
         public const float kUwDropInset = 0.2f;          // a car lane is dropped when its centre lies inside [Lo + inset, Hi - inset] of a band
-        public const float kUwProvisionalReach = 0.5f;  // a direction keeps a lane in the works bands when it reaches this far onto the old road
+        public const bool kUwShuttleHeadsOn = false;     // portable signal heads at the ends of a one-lane section (off: the standalone
+                                                         // TrafficLightCar01 object is not drawn in game)
+        public const float kUwShuttleMaxLength = 300f;   // one-lane alternating operation only over sections up to this long
+        public const float kUwShuttleGreenSec = 25f;     // green per direction (game seconds at normal speed)
+        public const float kUwShuttleClearMinSec = 4f;   // all-red at least this long ...
+        public const float kUwShuttleClearMaxSec = 60f;  // ... and until the section is empty, at most this long
         public const float kUwBlockerNodeSetback = 30f;  // lane blockers and bands stop this far before each node
         public const float kUwDrivewayKeepOut = 3f;      // +- along the road around a building access: no standing machine
         public const float kUwSlewLimitDeg = 15f;        // excavator slew next to traffic (front dump only)

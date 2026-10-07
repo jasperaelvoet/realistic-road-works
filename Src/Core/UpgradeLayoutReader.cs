@@ -264,7 +264,7 @@ namespace RealisticRoadWorks.V3
                         if (em.HasComponent<NetLaneData>(lp)) width = em.GetComponentData<NetLaneData>(lp).m_Width;
                         if (car && em.HasComponent<CarLaneData>(lp) && (em.GetComponentData<CarLaneData>(lp).m_RoadTypes & Game.Net.RoadTypes.Car) == 0) bikeOnly = true;
                     }
-                    var p = LaneSection.Probe(frame, em.GetComponentData<NetCurve>(lane).m_Bezier, width * 0.5f, LaneBits.None);
+                    var p = LaneSection.Probe(frame, LaneShiftRegistry.MeasureCurve(em, lane), width * 0.5f, LaneBits.None);
                     if (p.Dir == 0) continue;
                     bool twoway = (car && (em.GetComponentData<NetCarLane>(lane).m_Flags & Game.Net.CarLaneFlags.Twoway) != 0)
                                   || (track && (em.GetComponentData<NetTrackLane>(lane).m_Flags & Game.Net.TrackLaneFlags.Twoway) != 0);

@@ -217,13 +217,25 @@ namespace RealisticRoadWorks.V3.UI
         //                                             without a reason
         //   otherwise                              -> the primitive's line (one direction closed, road closed, sidewalk closed,
         //                                             traffic not affected)
+        // Traffic moved the closed half's lanes onto temporary lanes of the open half on some edge of the project.
+        private static bool HalfTwoWay(uint projectId, int window)
+        {
+            if (!SiteRegistry.TryGetProject(projectId, out var p)) return false;
+            foreach (var e in p.Edges)
+                if (SiteRegistry.TryGetEdge(e, out var rec) && rec.Upgrade != null && rec.Upgrade.TempHalfWindow == window && !float.IsNaN(rec.Upgrade.TempHalfLo))
+                    return true;
+            return false;
+        }
+
         private static string UpgradeTrafficState(WorksPanelState st, RRWSetting s, int kmh)
         {
             if (s != null && s.Policy == ClosurePolicy.VisualOnly) return RRWText.Get(RRWText.TrafficOpen);
             if (UpgradeSwitching(st)) return RRWText.Get(RRWText.UpgradeTrafficSwitching);
             var u = st.View.Upgrade;
             var t = u.AppliedTraffic;
+            if (UpgradeShuttle.GreenAt.ContainsKey(st.ProjectId)) return RRWText.Get(RRWText.UpgradeTrafficShuttle);
             if (t == BandTraffic.Drop) return RRWText.Format(RRWText.UpgradeTrafficLaneDrop, kmh);
+            if (t == BandTraffic.Half && HalfTwoWay(st.ProjectId, u.AppliedWindow)) return RRWText.Get(RRWText.UpgradeTrafficHalfTwoWay);
             if (IsSlowZonePrimitive(t))
                 return u.Reason != StageBlockReason.None
                     ? RRWText.Format(RRWText.UpgradeTrafficDressing, RRWText.Get(PhasePlan.StageReasonKey(u.Reason)))

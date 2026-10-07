@@ -81,19 +81,14 @@ namespace RealisticRoadWorks.V3
         public static bool EveryDirectionKeepsLane(List<SubStrip> crossSection, IList<UpgradeBand> bands, int bandCount, int window)
         {
             if (crossSection == null) return false;
-            bool hasF = false, hasB = false, keepF = false, keepB = false;
-            for (int k = 0; k < crossSection.Count; k++)
-            {
-                var s = crossSection[k];
-                if (s.Kind != SubKind.DriveLane || s.Dir == 0) continue;
-                float c = (s.Lo + s.Hi) * 0.5f;
-                bool dropped = InWorkBands(c, bands, bandCount, window, false)
-                               && !IsProvisional(crossSection, bands, bandCount, window, false, c);
-                if (s.Dir > 0) { hasF = true; keepF |= !dropped; }
-                else { hasB = true; keepB |= !dropped; }
-            }
-            return (!hasF || keepF) && (!hasB || keepB) && (hasF || hasB);
+            var plan = s_Plan;
+            // window < 0: every build band at once
+            UpgradeTempLanes.Plan(crossSection, bands, bandCount, window < 0 ? 0 : window, window < 0, plan);
+            if (plan.LaneCount == 0) return false;
+            return plan.Arrangement == TempArrangement.Open || plan.Arrangement == TempArrangement.Untouched;
         }
+
+        private static readonly TempLanePlan s_Plan = new TempLanePlan();
 
         // A build / rebuild band that works in `window` holds this lane centre (window < 0: any window; allAtOnce: the window's
         // bands and every later one, which drop their lanes from the start).
@@ -107,47 +102,6 @@ namespace RealisticRoadWorks.V3
                 if (InBand(laneCentre, b.Lo, b.Hi)) return true;
             }
             return false;
-        }
-
-        // Lane by lane: when every drive lane of a direction lies in the works bands, that direction keeps the lane that reaches
-        // furthest beyond the bands onto the existing road (at least kUwProvisionalReach) as a provisional lane, so traffic keeps
-        // running both ways next to the works; the strip under it is paved over with the traffic switch. Is the drive lane with
-        // this centre such a lane?
-        public static bool IsProvisional(List<SubStrip> cs, IList<UpgradeBand> bands, int bandCount, int window, bool allAtOnce,
-                                         float laneCentre)
-        {
-            if (cs == null) return false;
-            int lane = -1;
-            for (int k = 0; k < cs.Count && lane < 0; k++)
-                if (cs[k].Kind == SubKind.DriveLane && cs[k].Dir != 0 && math.abs((cs[k].Lo + cs[k].Hi) * 0.5f - laneCentre) < 0.3f) lane = k;
-            if (lane < 0) return false;
-            sbyte dir = cs[lane].Dir;
-            int best = -1;
-            float bestOut = 0f;
-            for (int k = 0; k < cs.Count; k++)
-            {
-                var s = cs[k];
-                if (s.Kind != SubKind.DriveLane || s.Dir != dir) continue;
-                float c = (s.Lo + s.Hi) * 0.5f;
-                if (!InWorkBands(c, bands, bandCount, window, allAtOnce)) return false;   // the direction keeps a lane anyway
-                float outside = OutsideBands(s.Lo, s.Hi, bands, bandCount, window, allAtOnce);
-                if (outside > bestOut) { bestOut = outside; best = k; }
-            }
-            return best == lane && bestOut >= RRWConst.kUwProvisionalReach;
-        }
-
-        // Length of [lo, hi] not covered by the works bands of `window`.
-        private static float OutsideBands(float lo, float hi, IList<UpgradeBand> bands, int bandCount, int window, bool allAtOnce)
-        {
-            float covered = 0f;
-            for (int i = 0; i < bandCount && i < bands.Count; i++)
-            {
-                var b = bands[i];
-                if (b.Kind != BandKind.Build && b.Kind != BandKind.Rebuild) continue;
-                if (window >= 0 && (allAtOnce ? b.Window < window : b.Window != window)) continue;
-                covered += math.max(0f, math.min(hi, b.Hi) - math.max(lo, b.Lo));
-            }
-            return math.max(0f, (hi - lo) - covered);
         }
 
         // Same from a classifier result and the NEW layout (Tools, at creation: SiteFactoryEdge.KeepsLanes over every build band).
@@ -189,7 +143,7 @@ namespace RealisticRoadWorks.V3
             if (zone != RoadZones.None && (zone & ~u.AppliedZones) == 0 && rec.ClosureApplied == ClosureLevel.Closed
                 && (rec.OpenLanesApplied & zone) == 0) return true;
             if (s.Kind != SubKind.DriveLane && s.Kind != SubKind.Bike) return false;
-            return ue.DroppedIn(rec.GeometryRevision, u, s.Lo, s.Hi, savedBand);
+            return ue.DroppedIn(rec.GeometryRevision, u, s.Lo, s.Hi, savedBand) || ue.TempLaneFree(rec.GeometryRevision, u, s.Lo, s.Hi);
         }
 
         // A new parking sub-strip whose (empty) lane Traffic switched off, list current for this geometry.
@@ -215,6 +169,12 @@ namespace RealisticRoadWorks.V3
             if (s.Kind == SubKind.DriveLane && ue.DroppedIn(rec.GeometryRevision, u, s.Lo, s.Hi, savedBand))
             {
                 st.DropReady = ue.DroppedIn(rec.GeometryRevision, u, s.Lo, s.Hi, savedBand, true, true);
+                st.DropIntrusion = ue.DropIntrusion;
+            }
+            else if ((s.Kind == SubKind.DriveLane || s.Kind == SubKind.NewParking) && ue.TempLaneFree(rec.GeometryRevision, u, s.Lo, s.Hi))
+            {
+                // the lane that runs here moved onto its temporary lane
+                st.DropReady = true;
                 st.DropIntrusion = ue.DropIntrusion;
             }
             st.ParkingOff = SubStripParkingOff(rec, s);
@@ -449,20 +409,149 @@ namespace RealisticRoadWorks.V3
             return true;
         }
 
-        // Saved band (index into Bands) whose lanes are dropped for a car lane with this EDGE-frame centre: a build / rebuild band of
-        // `window` (allAtOnce: of `window` or a later one; a finished band hands its lanes back) with the centre inside it
-        // (UpgradeLanes.InBand). -1 = none.
+        // ---- temporary lanes (UpgradeTempLanes) of a window, cached per geometry / tail / window / AllAtOnce. Readers: Traffic
+        //      (drops, lane shifts), Surfaces (yellow lines), Machines (moved-away lanes), Dev.
+        public readonly TempLanePlan TempPlan = new TempLanePlan();
+        private int m_PlanGeo = -1, m_PlanTail = -1, m_PlanWindow = -9, m_PlanCs = -1;
+        private bool m_PlanAao;
+        private float m_PlanXLo = float.NaN, m_PlanXHi = float.NaN;
+
+        // The plan for `window` (extraLo / extraHi: a closed part of the carriageway, e.g. the half resurfaced now).
+        public TempLanePlan PlanFor(int window, bool allAtOnce, float extraLo = float.NaN, float extraHi = float.NaN)
+        {
+            if (m_PlanGeo == SubStripsRevision && m_PlanTail == TailRevision && m_PlanWindow == window && m_PlanAao == allAtOnce
+                && m_PlanCs == CrossSection.Count && SameF(m_PlanXLo, extraLo) && SameF(m_PlanXHi, extraHi)) return TempPlan;
+            UpgradeTempLanes.Plan(CrossSection, Bands, BandCount, window, allAtOnce, TempPlan, extraLo, extraHi);
+            m_PlanGeo = SubStripsRevision; m_PlanTail = TailRevision; m_PlanWindow = window; m_PlanAao = allAtOnce;
+            m_PlanCs = CrossSection.Count; m_PlanXLo = extraLo; m_PlanXHi = extraHi;
+            return TempPlan;
+        }
+
+        private static bool SameF(float a, float b) => (float.IsNaN(a) && float.IsNaN(b)) || a == b;
+
+        // EDGE-frame lateral range of one carriageway half of the cross-section (edgeLeft: the half left of the direction split).
+        // False without drive lanes of both directions.
+        public bool HalfInterval(bool edgeLeft, out float lo, out float hi)
+        {
+            lo = hi = 0f;
+            float cLo = float.MaxValue, cHi = float.MinValue, sumF = 0f, sumB = 0f;
+            int nF = 0, nB = 0;
+            for (int k = 0; k < CrossSection.Count; k++)
+            {
+                var s = CrossSection[k];
+                if (s.Kind != SubKind.DriveLane && s.Kind != SubKind.NewParking && s.Kind != SubKind.Bike) continue;
+                cLo = math.min(cLo, s.Lo); cHi = math.max(cHi, s.Hi);
+                if (s.Kind != SubKind.DriveLane || s.Dir == 0) continue;
+                if (s.Dir > 0) { nF++; sumF += (s.Lo + s.Hi) * 0.5f; } else { nB++; sumB += (s.Lo + s.Hi) * 0.5f; }
+            }
+            if (nF == 0 || nB == 0) return false;
+            int leftDir = sumF / nF < sumB / nB ? 1 : -1;
+            float leftHi = float.MinValue, rightLo = float.MaxValue;
+            for (int k = 0; k < CrossSection.Count; k++)
+            {
+                var s = CrossSection[k];
+                if (s.Kind != SubKind.DriveLane || s.Dir == 0) continue;
+                if (s.Dir == leftDir) leftHi = math.max(leftHi, s.Hi); else rightLo = math.min(rightLo, s.Lo);
+            }
+            float split = (leftHi + rightLo) * 0.5f;
+            if (edgeLeft) { lo = cLo; hi = split; } else { lo = split; hi = cHi; }
+            return hi > lo;
+        }
+
+        // The EDGE-frame half of a chain-frame car half (LeftHalf / RightHalf) on this edge.
+        public bool ChainHalfInterval(RoadZones chainHalf, out float lo, out float hi)
+        {
+            bool chainLeft = (chainHalf & RoadZones.LeftHalf) != 0;
+            return HalfInterval(chainLeft != ChainReversed, out lo, out hi);
+        }
+
+        // Re-marking window: both directions fit on temporary lanes over either half while the other one is resurfaced.
+        public bool RemarkTwoWay(int window, bool allAtOnce)
+        {
+            for (int h = 0; h < 2; h++)
+            {
+                if (!HalfInterval(h == 0, out float lo, out float hi)) return false;
+                var plan = PlanFor(window, allAtOnce, lo, hi);
+                if (plan.Arrangement != TempArrangement.Open) return false;
+            }
+            return true;
+        }
+
+        // Re-marking window: at least one shared lane (alternating) over either half while the other one is resurfaced.
+        public bool RemarkShuttle(int window, bool allAtOnce)
+        {
+            for (int h = 0; h < 2; h++)
+            {
+                if (!HalfInterval(h == 0, out float lo, out float hi)) return false;
+                var a = PlanFor(window, allAtOnce, lo, hi).Arrangement;
+                if (a != TempArrangement.Open && a != TempArrangement.Shuttle) return false;
+            }
+            return true;
+        }
+
+        // Build window: the plan keeps traffic moving (own lanes or one shared lane); shared: it uses the shared lane.
+        public bool KeepsTraffic(int window, bool allAtOnce, out bool shared)
+        {
+            var a = PlanFor(window, allAtOnce).Arrangement;
+            shared = a == TempArrangement.Shuttle;
+            return a != TempArrangement.Closed && PlanFor(window, allAtOnce).LaneCount > 0;
+        }
+
+        // ---- temporary lanes on a half (Traffic is the ONLY writer): the closed half of a re-marking window whose lanes moved
+        //      onto the other half. NaN = none. Surfaces draws the lines of PlanFor(TempHalfWindow, AllAtOnce, lo, hi).
+        public int TempHalfWindow = -2;
+        public float TempHalfLo = float.NaN, TempHalfHi = float.NaN;
+
+        // ---- temporary lane report (Traffic is the ONLY writer): every lane of the plan of ShiftWindow reached its temporary lane
+        //      (or its strip in the works) for this geometry.
+        public bool ShiftSettled;
+        public int ShiftWindow = -2;
+        public int ShiftRevision = -1;
+
+        // Is (lo, hi) (EDGE frame, a drive-lane sub-strip) free of traffic because the lanes moved: no open temporary lane
+        // overlaps it, every lane of the plan moved where it belongs, and every dropped lane whose old or new strip overlaps it is
+        // drop-ready (markers registered and drained).
+        public bool TempLaneFree(int geometryRevision, in UpgradeView u, float lo, float hi)
+        {
+            int w = DropWindowFor(geometryRevision, u);
+            if (w < 0 || !ShiftSettled || ShiftWindow != w || ShiftRevision != geometryRevision) return false;
+            var plan = PlanFor(w, u.AllAtOnce);
+            if (plan.LaneCount == 0 || plan.Arrangement == TempArrangement.Untouched) return false;
+            for (int k = 0; k < plan.SlotCount; k++)
+                if (math.min(hi, plan.Slots[k].Hi) - math.max(lo, plan.Slots[k].Lo) > 0.05f) return false;
+            bool needReady = false;
+            for (int i = 0; i < plan.LaneCount; i++)
+            {
+                if (plan.LaneSlot[i] >= 0) continue;
+                float hw = plan.LaneWidth[i] * 0.5f;
+                bool oldOn = math.min(hi, plan.LaneCentre[i] + hw) - math.max(lo, plan.LaneCentre[i] - hw) > 0.05f;
+                bool newOn = math.min(hi, plan.LaneTarget[i] + hw) - math.max(lo, plan.LaneTarget[i] - hw) > 0.05f;
+                needReady |= oldOn || newOn;
+            }
+            return !needReady || DropReadyFor(geometryRevision, w, u.AllAtOnce);
+        }
+
+        // Saved band (index into Bands) whose lanes are dropped for a car lane with this EDGE-frame centre: the temporary lane
+        // plan of `window` drops the lane (it is in a build / rebuild band of the window, or has no room on the drivable asphalt);
+        // the band is the window's build / rebuild band holding the lane, else the nearest one. -1 = not dropped.
         public int DropBandOf(float laneCentreEdge, int window, bool allAtOnce)
         {
-            if (UpgradeLanes.IsProvisional(CrossSection, Bands, BandCount, window, allAtOnce, laneCentreEdge)) return -1;
+            var plan = PlanFor(window, allAtOnce);
+            bool planned = plan.LaneCount > 0;   // no cross-section yet: the lanes inside the window's bands
+            if (planned && !plan.Dropped(laneCentreEdge)) return -1;
+            int best = -1;
+            float bd = float.MaxValue;
             for (int i = 0; i < BandCount; i++)
             {
                 var b = Bands[i];
                 if (b.Kind != BandKind.Build && b.Kind != BandKind.Rebuild) continue;
                 if (allAtOnce ? b.Window < window : b.Window != window) continue;
                 if (UpgradeLanes.InBand(laneCentreEdge, b.Lo, b.Hi)) return i;
+                if (!planned) continue;
+                float d = math.min(math.abs(laneCentreEdge - b.Lo), math.abs(laneCentreEdge - b.Hi));
+                if (d < bd) { bd = d; best = i; }
             }
-            return -1;
+            return best;
         }
 
         // The edge's bands in `window` have a lane-type sub-strip.

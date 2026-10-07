@@ -169,6 +169,8 @@ namespace RealisticRoadWorks.V3.Traffic
 
         public static void Reset()
         {
+            TrafficLaneShift.Reset();
+            TrafficShuttle.Reset();
             s_Views.Clear();
             s_Machines.Clear();
             s_MachinesUpdate = uint.MaxValue;
@@ -178,7 +180,10 @@ namespace RealisticRoadWorks.V3.Traffic
         public static void Step(EntityManager em, World world, uint upd, in TrafficSettings s)
         {
             RunRefreshes(em, upd);
+            s_ShuttleWanted.Clear();
+            s_ShuttleUnsettled.Clear();
             foreach (var kv in SiteRegistry.Edges) SyncEdge(em, world, kv.Key, kv.Value, s, upd);
+            TrafficShuttle.Step(em, s_ShuttleWanted, s_ShuttleUnsettled, RRWClock.SimFrame);
             // edges that left the registry: release what they still carry
             s_Keys.Clear();
             foreach (var kv in TrafficState.Upgrade) s_Keys.Add(kv.Key);
@@ -192,6 +197,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 ProcessParkingReturns(em, et, upd);
                 if (et.Lanes.Count == 0 && et.ParkingOff.Count == 0 && !SiteRegistry.Edges.ContainsKey(et.Edge)) TrafficState.Upgrade.Remove(et.Edge);
             }
+            TrafficLaneShift.Maintain(em, RRWClock.SimFrame);
             TrafficDetour.Step(em, upd);
         }
 
@@ -299,6 +305,28 @@ namespace RealisticRoadWorks.V3.Traffic
                               et.Tail != st.TailRevision || lanesDied || (want && !st.DropCurrent(rec.GeometryRevision, lw, aao));
             if (!want)
             {
+                // re-marking one half at a time: the closed half's lanes drive on temporary lanes over the open half
+                if (RemarkHalfPlan(em, rec, st, h, uv, slot, out var hp, out float hLo, out float hHi))
+                {
+                    bool done = TrafficLaneShift.Sync(em, et.Edge, arc, hp, MarkerLanes(et), MarkerPositions(em, et), RRWClock.SimFrame, true);
+                    if (st.TempHalfWindow != uv.AppliedWindow || st.TempHalfLo != hLo || st.TempHalfHi != hHi)
+                        RRWLog.Info("traffic p" + rec.ProjectId + " e" + rec.Edge.Index + " re-marking half [" + RRWLog.F(hLo) + ", " + RRWLog.F(hHi) +
+                                    "]: temporary lanes on the open half: " + hp.Describe());
+                    st.TempHalfWindow = uv.AppliedWindow;
+                    st.TempHalfLo = hLo;
+                    st.TempHalfHi = hHi;
+                    st.ShiftSettled = done;
+                    st.ShiftWindow = -2;
+                    if (hp.Arrangement == TempArrangement.Shuttle) { s_ShuttleWanted.Add(rec.ProjectId); if (!done) s_ShuttleUnsettled.Add(rec.ProjectId); }
+                }
+                else
+                {
+                    TrafficLaneShift.Release(em, et.Edge, MarkerLanes(et), RRWClock.SimFrame);
+                    st.ShiftSettled = false;
+                    st.ShiftWindow = -2;
+                    st.TempHalfWindow = -2;
+                    st.TempHalfLo = st.TempHalfHi = float.NaN;
+                }
                 if (keyChanged || st.DropWindow != -2 || st.DropLanes.Count > 0)
                 {
                     bool had = HasActive(et);
@@ -317,7 +345,18 @@ namespace RealisticRoadWorks.V3.Traffic
                 return;
             }
             if (keyChanged) Resolve(em, et, rec, st, slot, arc, lw, aao, upd);
-            Maintain(em, world, et, rec, st, arc, rt, upd);
+            // temporary lanes first: markers go onto the moved curves once every lane of the edge arrived
+            bool settled = TrafficLaneShift.Sync(em, et.Edge, arc, et.Why.Length == 0 ? st.PlanFor(lw, aao) : null, MarkerLanes(et),
+                                                 MarkerPositions(em, et), RRWClock.SimFrame);
+            st.ShiftSettled = settled && et.Why.Length == 0;
+            if (et.Why.Length == 0 && st.PlanFor(lw, aao).Arrangement == TempArrangement.Shuttle)
+            {
+                s_ShuttleWanted.Add(rec.ProjectId);
+                if (!st.ShiftSettled) s_ShuttleUnsettled.Add(rec.ProjectId);
+            }
+            st.ShiftWindow = lw;
+            st.ShiftRevision = rec.GeometryRevision;
+            if (settled) Maintain(em, world, et, rec, st, arc, rt, upd);
             Report(em, et, rec, st, proj, arc, uv, upd);
         }
 
@@ -435,6 +474,47 @@ namespace RealisticRoadWorks.V3.Traffic
                             (none != null ? "none (" + none + ")" : st.DropLanes.Count + " lane(s) at lateral [" + s_Sb + "] of " + s_Drive.Count + " drive lanes") +
                             " geo=" + rec.GeometryRevision + " tail=" + st.TailRevision);
             }
+        }
+
+        // The applied window is a re-marking window running Half on this building-free edge with room for both directions on
+        // the open half: its plan and the closed half (EDGE frame).
+        private static bool RemarkHalfPlan(EntityManager em, EdgeRecord rec, UpgradeEdgeState st, bool h, in UpgradeView uv, TrafficEdgeSlot slot,
+                                           out TempLanePlan plan, out float lo, out float hi)
+        {
+            plan = null; lo = hi = float.NaN;
+            if (!h || !RRWGates.UpgradeDrop || uv.AppliedTraffic != BandTraffic.Half || !uv.RemarkWindow(uv.AppliedWindow)) return false;
+            int buildings = Math.Max(slot != null ? slot.Buildings : 0, rec.BuildingCount);
+            if (buildings > 0) return false;
+            var closed = uv.AppliedZones & RoadZones.Carriageway;
+            if (closed != RoadZones.LeftHalf && closed != RoadZones.RightHalf) return false;
+            if (!st.ChainHalfInterval(closed, out lo, out hi)) return false;
+            plan = st.PlanFor(uv.AppliedWindow, uv.AllAtOnce, lo, hi);
+            return plan.Arrangement == TempArrangement.Open || (plan.Arrangement == TempArrangement.Shuttle && TrafficShuttle.Allowed(em, rec.ProjectId));
+        }
+
+        private static readonly HashSet<uint> s_ShuttleWanted = new HashSet<uint>(), s_ShuttleUnsettled = new HashSet<uint>();
+        private static readonly HashSet<Entity> s_MarkerLanes = new HashSet<Entity>();
+        private static readonly List<float3> s_MarkerPos = new List<float3>(32);
+
+        // Lanes of the edge that carry markers now (any stage): they keep their curve until the markers are gone.
+        private static HashSet<Entity> MarkerLanes(EdgeUpgradeTraffic et)
+        {
+            s_MarkerLanes.Clear();
+            for (int i = 0; i < et.Lanes.Count; i++)
+                if (et.Lanes[i].Markers.Count > 0) { s_MarkerLanes.Add(et.Lanes[i].Lane); for (int k = 0; k < et.Lanes[i].Registered.Count; k++) s_MarkerLanes.Add(et.Lanes[i].Registered[k]); }
+            return s_MarkerLanes;
+        }
+
+        private static List<float3> MarkerPositions(EntityManager em, EdgeUpgradeTraffic et)
+        {
+            s_MarkerPos.Clear();
+            for (int i = 0; i < et.Lanes.Count; i++)
+                for (int k = 0; k < et.Lanes[i].Markers.Count; k++)
+                {
+                    var m = et.Lanes[i].Markers[k];
+                    if (TrafficUtil.Alive(em, m) && em.HasComponent<ObjTransform>(m)) s_MarkerPos.Add(em.GetComponentData<ObjTransform>(m).m_Position);
+                }
+            return s_MarkerPos;
         }
 
         private static bool IsDropped(Entity lane)

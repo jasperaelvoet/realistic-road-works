@@ -182,7 +182,7 @@ namespace RealisticRoadWorks.V3
             {
                 Entity lane = buf[i].m_SubLane;
                 if (!LaneBitsOf(em, lane, out LaneBits bits, out float width)) continue;
-                var lc = em.GetComponentData<Curve>(lane).m_Bezier;
+                var lc = LaneShiftRegistry.MeasureCurve(em, lane);
                 output.Add(LaneSection.Probe(arc, lc, width * 0.5f, bits));
                 lanesOut?.Add(lane);
             }
@@ -228,7 +228,7 @@ namespace RealisticRoadWorks.V3
         {
             probe = default;
             if (arc == null || !LaneBitsOf(em, lane, out LaneBits bits, out float width)) return false;
-            probe = LaneSection.Probe(arc, em.GetComponentData<Curve>(lane).m_Bezier, width * 0.5f, bits);
+            probe = LaneSection.Probe(arc, LaneShiftRegistry.MeasureCurve(em, lane), width * 0.5f, bits);
             return true;
         }
 
@@ -238,7 +238,7 @@ namespace RealisticRoadWorks.V3
         {
             centre = 0f;
             if (arc == null || !Alive(em, lane) || !em.HasComponent<Curve>(lane)) return false;
-            centre = LaneSection.Probe(arc, em.GetComponentData<Curve>(lane).m_Bezier, 0f, LaneBits.None).Centre;
+            centre = LaneSection.Probe(arc, LaneShiftRegistry.MeasureCurve(em, lane), 0f, LaneBits.None).Centre;
             return true;
         }
 
@@ -255,7 +255,7 @@ namespace RealisticRoadWorks.V3
                 Entity lane = buf[i].m_SubLane;
                 if (!em.Exists(lane) || em.HasComponent<Deleted>(lane) || !em.HasComponent<Curve>(lane)) continue;
                 if (!em.HasComponent<NetCarLane>(lane) && !em.HasComponent<NetParkingLane>(lane) && !em.HasComponent<NetTrackLane>(lane)) continue;
-                var b = em.GetComponentData<Curve>(lane).m_Bezier;
+                var b = LaneShiftRegistry.MeasureCurve(em, lane);
                 uint k = math.hash(new int4((int3)math.round(b.a * 10f), lane.Index)) * 31u + math.hash(new int4((int3)math.round(b.d * 10f), lane.Version));
                 h = h * 16777619u ^ k;
                 if (h == 0u) h = 1u;

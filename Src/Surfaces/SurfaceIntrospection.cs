@@ -399,6 +399,20 @@ namespace RealisticRoadWorks.V3.Surfaces
                 problems.Add("surfaces: curing/scar " + what + " " + rel + " demolition edge " + RRWLog.E(edge) + " still waiting for the base-cover hand-over after " + (RRWClock.UpdateIndex - sc.WaitSince) + " updates");
         }
 
+        // The temporary lane plan Traffic applied on this edge now (lanes moved and settled), null otherwise.
+        private static TempLanePlan ActiveTempPlan(EdgeRecord rec, UpgradeEdgeState ue, in ProjectView v)
+        {
+            var u = v.Upgrade;
+            if (ue.TempHalfWindow >= 0 && ue.TempHalfWindow == u.AppliedWindow && !float.IsNaN(ue.TempHalfLo) && ue.ShiftSettled)
+                return ue.PlanFor(ue.TempHalfWindow, u.AllAtOnce, ue.TempHalfLo, ue.TempHalfHi);
+            if (ue.ShiftSettled && ue.ShiftWindow >= 0 && ue.ShiftRevision == rec.GeometryRevision)
+            {
+                var p = ue.PlanFor(ue.ShiftWindow, u.AllAtOnce);
+                if (p.Arrangement != TempArrangement.Untouched && p.SlotCount > 0) return p;
+            }
+            return null;
+        }
+
         const float kUpgradeBleed = 0.3f;   // a polygon may reach this far into an open lane (decal edge, rounding)
 
         // Upgrade works checks - every line must be 0 in game:
@@ -450,6 +464,21 @@ namespace RealisticRoadWorks.V3.Surfaces
                                 }
                             }
                             if (layer == SurfaceLayer.FreshAsphaltCover || float.IsNaN(t.LatLo) || float.IsNaN(t.LatHi)) continue;
+                            // temporary lanes: traffic drives on the plan's lanes, not on the road layout's lanes
+                            var tp = ActiveTempPlan(rec, ue, v);
+                            if (tp != null)
+                            {
+                                for (int j = 0; j < tp.SlotCount; j++)
+                                {
+                                    float ov = math.min(t.LatHi, tp.Slots[j].Hi) - math.max(t.LatLo, tp.Slots[j].Lo);
+                                    if (ov <= kUpgradeBleed) continue;
+                                    bleed++;
+                                    if (firstBleed == null)
+                                        firstBleed = layer + " [" + F(t.LatLo) + "," + F(t.LatHi) + "] " + F(ov) + " m into the temporary lane [" + F(tp.Slots[j].Lo) + "," + F(tp.Slots[j].Hi) + "]";
+                                    break;
+                                }
+                                continue;
+                            }
                             for (int j = 0; j < ue.CrossSection.Count; j++)
                             {
                                 var cs = ue.CrossSection[j];

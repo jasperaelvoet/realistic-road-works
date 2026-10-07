@@ -411,6 +411,8 @@ namespace RealisticRoadWorks.V3
         public const string UpgradeTipMixed = P + "Tooltip.Upgrade.Mixed";         // "{0}" hours, "{1}" traffic text
         public const string UpgradeTipTrafficDrop = P + "Tooltip.Upgrade.Traffic.Drop";
         public const string UpgradeTipTrafficOneWay = P + "Tooltip.Upgrade.Traffic.OneWay";
+        public const string UpgradeTrafficShuttle = P + "Panel.Upgrade.Traffic.Shuttle";
+        public const string UpgradeTrafficHalfTwoWay = P + "Panel.Upgrade.Traffic.HalfTwoWay";
         public const string UpgradeTipTrafficSlow = P + "Tooltip.Upgrade.Traffic.Slow";
         public const string UpgradeTipTrafficClosed = P + "Tooltip.Upgrade.Traffic.Closed";
         public const string UpgradeTipFullRebuild = P + "Tooltip.Upgrade.FullRebuild"; // "{0}" hours, "{1}" = StructuralKey text
@@ -567,17 +569,19 @@ namespace RealisticRoadWorks.V3
             { UpgradeBandMiddle, "Middle" },
             { UpgradeBandMarkings, "Markings" },
             { UpgradeBandPhase, "{0} · {1} · {2}%" },
-            { UpgradeTrafficLaneDrop, "Outer lanes closed · traffic keeps flowing at {0} km/h" },
+            { UpgradeTrafficLaneDrop, "Temporary lanes · both directions keep flowing at {0} km/h" },
             { UpgradeTrafficOneWay, "One direction closed · detour signed" },
+            { UpgradeTrafficShuttle, "One lane · traffic lights let each direction through in turn" },
+            { UpgradeTrafficHalfTwoWay, "One half resurfaced · both directions on temporary lanes" },
             { UpgradeTrafficUnaffected, "Traffic not affected · sidewalk fenced" },
             { UpgradeTrafficDressing, "Slow zone · {0}" },
             { UpgradeTrafficNoLaneClosure, "Lanes cannot be closed here · slow zone, no machines in the lanes" },
             { UpgradeTipWidening, "Widening ≈ {0} · {1}" },
             { UpgradeTipNarrowing, "Removing lanes ≈ {0} · traffic not affected" },
-            { UpgradeTipRemark, "Re-marking ≈ {0} · one direction at a time" },
+            { UpgradeTipRemark, "Re-marking ≈ {0} · one half at a time" },
             { UpgradeTipMixed, "Rebuilding lanes ≈ {0} · {1}" },
-            { UpgradeTipTrafficDrop, "outer lanes closed" },
-            { UpgradeTipTrafficOneWay, "one direction at a time" },
+            { UpgradeTipTrafficDrop, "temporary lanes" },
+            { UpgradeTipTrafficOneWay, "one half at a time" },
             { UpgradeTipTrafficSlow, "slow zone" },
             { UpgradeTipTrafficClosed, "road closes" },
             { UpgradeTipFullRebuild, "Full rebuild ≈ {0} · {1}" },

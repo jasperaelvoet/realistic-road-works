@@ -889,7 +889,7 @@ namespace RealisticRoadWorks.V3.Props
                     PxPerf.Count(PxC.HealMissing);
                     continue;
                 }
-                if (PropKeys.Kind(sl.Key) == PropKind.Signal) AssertSignal(pp, sl.Entity);   // amber head: once per self-heal cycle
+                if (PropKeys.Kind(sl.Key) == PropKind.Signal && !ShuttleHead(sl.Key)) AssertSignal(pp, sl.Entity);   // amber head: once per self-heal cycle
             }
             PxPerf.Count(PxC.HealScanned, per);
             return missing;
@@ -915,6 +915,8 @@ namespace RealisticRoadWorks.V3.Props
                           | (pp.LampSite ? 1u << 18 : 0u) | (pp.Far ? 1u << 19 : 0u) | (pp.FencesFit ? 1u << 20 : 0u));
             r3 = Mix(r3, Mix((uint)RRWGates.Revision, (uint)m_SpeedKmh));
             r3 = Mix(r3, Mix(pp.AccessKey, ClosedBKeyOf(pp)));
+            // one-lane signals: present, and which end has green (each phase change re-diffs the signal heads)
+            r3 = Mix(r3, UpgradeShuttle.GreenAt.TryGetValue(p.Id, out var greenNode) ? (uint)greenNode.Index * 2654435761u + 1u : 0u);
             // Barrier keeps in 1/256 steps (they sweep continuously over f .90-.98; the raw bits would re-diff EVERY
             // update of the pick-up). A line has < 64 barriers, so a pick-up waits < 1/256 of the .04 window at most.
             r3 = Mix(r3, Mix((uint)math.floor(plan.StartBarrierKeep * 256f), (uint)math.floor(plan.EndBarrierKeep * 256f)));
@@ -1060,6 +1062,7 @@ namespace RealisticRoadWorks.V3.Props
                 UpgradeBands(p, pp, view, plan, limited);
                 UpgradeHeaps(p, pp, view, limited, true);
                 UpgradeSummary(p, pp, view, plan);
+                ShuttleHeads(p, pp, view);
             }
 
             // delete what no slot wants any more
@@ -1596,7 +1599,7 @@ namespace RealisticRoadWorks.V3.Props
                 if (geo || y) Replace(p, pp, slot, w, ce, s);
                 UpdateFill(slot, w.Fill);
                 if (pp.OwnersDirty && slot.Owner != Entity.Null && !EcsUtil.Alive(em, slot.Owner)) ReOwn(slot, w, ce);
-                if (w.Kind == PropKind.Signal) AssertSignal(pp, slot.Entity);   // amber head: re-asserted on every diff / self-heal pass
+                if (w.Kind == PropKind.Signal && !ShuttleHead(w.Key)) AssertSignal(pp, slot.Entity);   // amber head: re-asserted on every diff / self-heal pass
                 return;
             }
             if (slot == null)
@@ -1657,7 +1660,8 @@ namespace RealisticRoadWorks.V3.Props
             EcsUtil.TagDerived(em, e, ce.Edge, p.Id, w.Group);
             if (w.Kind == PropKind.Signal && em.HasComponent<Game.Objects.TrafficLight>(e))
             {
-                em.SetComponentData(e, new Game.Objects.TrafficLight { m_State = Game.Objects.TrafficLightState.Yellow | Game.Objects.TrafficLightState.Flashing });
+                em.SetComponentData(e, new Game.Objects.TrafficLight { m_State = ShuttleHead(w.Key) ? Game.Objects.TrafficLightState.Red
+                                                                          : Game.Objects.TrafficLightState.Yellow | Game.Objects.TrafficLightState.Flashing });
                 pp.SignalWrites++;
             }
 

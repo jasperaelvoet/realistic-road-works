@@ -105,6 +105,14 @@ namespace RealisticRoadWorks.V3.Surfaces
                 ctx.Log("rrw surf p" + id + " " + p.Kind + " mode=" + p.Mode + " phase=" + p.Phase + " f=" + SurfaceDevUtil.F(p.PhaseFraction)
                         + " U=" + SurfaceDevUtil.F(p.ChainLength) + " crews=" + v.CrewCount + (v.Cancelled ? " cancelCrews=" + v.CancelCrewCount : "")
                         + " open=" + p.OpenLanes + spans);
+                foreach (var e in p.Edges)
+                    if (SurfaceState.Edges.TryGetValue(e, out var esr) && esr.TempRows.Count > 0)
+                    {
+                        var sb = new System.Text.StringBuilder("rrw surf p" + id + " e" + e.Index + " yellow rows=" + esr.TempRows.Count + " (" + esr.TempReason + ")");
+                        foreach (var r in esr.TempRows)
+                            sb.Append(" | ").Append(SurfaceDevUtil.F((r.Left + r.Right) * 0.5f)).Append(r.Dashed ? " dashed" : " solid").Append(" pieces=").Append(r.Pieces.Count);
+                        ctx.Log(sb.ToString());
+                    }
                 int multi = 0, outgoing = 0, maxPieces = 0;
                 foreach (var e in p.Edges)
                     if (SurfaceState.Edges.TryGetValue(e, out var es2))

@@ -51,10 +51,11 @@ uses the game's own assets, and the save keeps only one small component per road
 
 ### Road upgrades
 
-- Replacing a road with another type builds only what changes: a widening digs, grades and paves just the new strip, a narrowing
-  breaks out just the removed strip, and a lane or marking change is re-marked one direction at a time.
-- Lane by lane: traffic keeps both directions open next to the works on yellow temporary construction markings; only the lanes
-  being built are closed, and machines work only inside the closed strip.
+- Replacing a road with another type builds only what changes: a widening digs, grades and paves just the new strip (its
+  sidewalk included), a narrowing breaks out just the removed strip, and the lanes are re-marked one half at a time.
+- Temporary lanes: the old asphalt that stays drivable carries temporary lanes, marked with yellow temporary lines exactly where
+  cars drive; machines work only inside the closed strip.
+- One lane with traffic lights: where only one lane fits, both directions share it and alternate at red / green signals.
 - On streets with houses every lane, parking spot and driveway stays open (slow zone).
 - Setting "Road upgrades": Realistic, Full rebuild or Instant. Decorations (trees, lights) are always instant.
 

@@ -671,3 +671,17 @@ namespace RealisticRoadWorks.V3.Traffic
     }
 }
 #endif
+#if DEVTOOLS
+namespace RealisticRoadWorks.V3.Traffic
+{
+    public sealed class ShuttleStatusCommand : RealisticRoadWorks.Dev.IDevCommand
+    {
+        public string Name => "rrw.tr.shuttle";
+        public string Help => "rrw.tr.shuttle - one-lane alternating operation: armed signal sets, phase, vehicles on the section; moved lanes";
+        public void Run(RealisticRoadWorks.Dev.DevContext ctx, string[] a)
+        {
+            ctx.Log("rrw tr " + TrafficShuttle.Describe() + " | moved lanes=" + LaneShiftRegistry.Count + " shifted edges=" + TrafficLaneShift.EdgeCount);
+        }
+    }
+}
+#endif

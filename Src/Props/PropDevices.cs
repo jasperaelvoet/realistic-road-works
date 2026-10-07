@@ -603,6 +603,49 @@ namespace RealisticRoadWorks.V3.Props
             }
         }
 
+        // One-lane alternating operation (UpgradeShuttle.GreenAt, Traffic's cycle): a portable signal at each end of the section, on
+        // the kerb to the right of the traffic entering there, red / green from the cycle. Never a node sub-object (the game's
+        // TrafficLightSystem would drive it).
+        // The portable signals of a one-lane section (red / green from the cycle), not the flashing amber head.
+        private static bool ShuttleHead(int key) => key == PropKeys.Make(PropKind.Signal, 0, 1) || key == PropKeys.Make(PropKind.Signal, 1, 1);
+
+        private void ShuttleHeads(ProjectRecord p, ProjectProps pp, in ProjectView v)
+        {
+            if (!RRWConst.kUwShuttleHeadsOn || !UpgradeShuttle.GreenAt.TryGetValue(p.Id, out var green)) return;
+            Entity head = Themed(m_SignalHead);
+            if (head == Entity.Null) return;
+            bool lht = RRWCity.LeftHandTraffic;
+            for (int end = 0; end < 2; end++)
+            {
+                bool start = end == 0;
+                float uLine = LineU(p, v, start);
+                float inward = start ? 1f : -1f;
+                float u = uLine + inward * RRWConst.kSignInsetBehindLine;
+                var ce = PropLayout.Locate(pp.Chain, u, out float _, out float gap);
+                if (ce == null || gap > PropLayout.kCoverTolerance) continue;
+                var sec = ce.Record.Section;
+                float mag = math.max(sec.CarriageHi, -sec.CarriageLo) + 0.6f;
+                // entering at the start drives +u: its right is +lateral (chain frame); at the end -u
+                float lat = (start ? 1f : -1f) * (lht ? -1f : 1f) * mag;
+                var key = PropKeys.Make(PropKind.Signal, end, 1);
+                Apply(p, pp, new Want
+                {
+                    Key = key, Kind = PropKind.Signal, U = u, Lateral = lat, LatChain = true, Y = YMode.Curve, Rot = RotMode.Facing,
+                    YawExtra = (start ? 180f : 0f) + (RRWGates.SignalYawFlip ? 180f : 0f), JitterDeg = 0.5f, Fill = 255, Prefab = head,
+                    Group = DerivedGroup.PropStatic, NoOwner = true,
+                });
+                if (!pp.Slots.TryGetValue(key, out var slot) || slot.Entity == Entity.Null || !EntityManager.Exists(slot.Entity)) continue;
+                if (!EntityManager.HasComponent<Game.Objects.TrafficLight>(slot.Entity)) continue;
+                Entity node = start ? StartNodeOf(pp) : EndNodeOf(pp);
+                if (EntityManager.HasComponent<Game.Objects.Transform>(slot.Entity))
+                    RRWLog.Once("props-shuttle-head-p" + p.Id + "-" + end, "props: project #" + p.Id + " one-lane signal " + (start ? "start" : "end") + " at " +
+                                RRWLog.F3(EntityManager.GetComponentData<Game.Objects.Transform>(slot.Entity).m_Position) + " u=" + RRWLog.F(u) + " lat=" + RRWLog.F(lat));
+                var tl = EntityManager.GetComponentData<Game.Objects.TrafficLight>(slot.Entity);
+                var want = green != Entity.Null && green == node ? Game.Objects.TrafficLightState.Green : Game.Objects.TrafficLightState.Red;
+                if (tl.m_State != want) { tl.m_State = want; EntityManager.SetComponentData(slot.Entity, tl); }
+            }
+        }
+
         private void WantSign(ProjectRecord p, ProjectProps pp, int sub, int end, float u, float lat, float face, Entity prefab, Entity node)
         {
             if (prefab == Entity.Null) return;

@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] - 2026-10-07
+
+### Added
+
+- **Temporary lanes on the old asphalt.** For every step of an upgrade the mod compares the old and the new road: the asphalt
+  that stays drivable carries temporary lanes (moved sideways where the final lanes are not yet usable), marked with yellow
+  temporary lines exactly where cars drive. Lanes that do not fit are closed with lane closures inside the works.
+- **One lane with traffic lights.** When only one lane fits next to the works, both directions share it and alternate: red /
+  green signals at both ends of the section, an all-red phase that waits until the section is empty. Used on sections up to
+  300 m whose ends have no traffic lights of their own.
+- **Re-marking without a detour.** While one half of the road is resurfaced and painted, both directions use temporary lanes
+  on the other half (or one shared lane with signals on narrow roads) instead of closing one direction.
+
+### Changed
+
+- The sidewalk of a widened side is dug and built with the new strip and closed to pedestrians while it is built (on sides
+  without buildings).
+- Panel and tooltip texts describe the temporary lanes and the alternating one-lane operation.
+
+[3.2.0]: https://github.com/jasperaelvoet/realistic-road-works/releases/tag/v3.2.0
+
 ## [3.1.0] - 2026-10-07
 
 ### Added

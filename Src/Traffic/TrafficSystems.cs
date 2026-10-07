@@ -1298,7 +1298,7 @@ namespace RealisticRoadWorks.V3.Traffic
 
         protected override void OnUpdate()
         {
-            if (TrafficState.Closures.Count == 0 && TrafficState.Upgrade.Count == 0) return;
+            if (TrafficState.Closures.Count == 0 && TrafficState.Upgrade.Count == 0 && TrafficLaneShift.EdgeCount == 0 && TrafficShuttle.ActiveCount == 0) return;
             // Set first: if neutralising throws half-way, the restore system still re-applies every closure.
             TrafficState.SaveNeutralised = true;
             TrafficState.SaveFreeSpace.Clear();
@@ -1320,6 +1320,10 @@ namespace RealisticRoadWorks.V3.Traffic
                 }
                 // Lane closure markers of upgrade works: the lane data they cause, AFTER the closure snapshots were written.
                 int blockLanes = LaneClosureMarkers.NeutraliseForSave(em, out int owners, out int markers, out int noLivePath);
+                int moved = TrafficLaneShift.NeutraliseForSave(em);
+                int shuttles = TrafficShuttle.NeutraliseForSave(em);
+                if (shuttles > 0) RRWLog.Info("traffic save-guard: " + shuttles + " one-lane signal set(s) removed for the save (re-armed next update)");
+                if (moved > 0) RRWLog.Info("traffic save-guard: " + moved + " temporary lane(s) moved back for the save");
                 RRWLog.Info("traffic save-guard: neutralised " + n + " lane components (" + TrafficState.SaveFreeSpace.Count +
                             " parking free-space overrides, " + TrafficState.ForbiddenSnap.Count + " Forbidden bits, " + missing +
                             " lanes without snapshot) of " + TrafficState.Closures.Count + " closures; lane closure markers: " + blockLanes +
@@ -1345,6 +1349,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 em.CompleteAllTrackedJobs();
                 // Marker lane values first (they were neutralised last, on top of the closure snapshots), then the closures.
                 int markerLanes = LaneClosureMarkers.RestoreAfterSave(em);
+                TrafficLaneShift.RestoreAfterSave(em);
                 int n = 0;
                 Entity sentinel = TrafficState.HasClosed ? TrafficState.EnsureSentinel(em) : TrafficState.Sentinel;
                 foreach (var cl in TrafficState.Closures.Values)

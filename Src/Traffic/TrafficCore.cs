@@ -117,7 +117,7 @@ namespace RealisticRoadWorks.V3.Traffic
             if (m_Probe.TryGetValue(lane, out probe)) return true;
             probe = default;
             if (Arc == null || !em.Exists(lane) || !em.HasComponent<Curve>(lane)) return false;
-            probe = LaneSection.Probe(Arc, em.GetComponentData<Curve>(lane).m_Bezier, 0f, LaneBits.None);
+            probe = LaneSection.Probe(Arc, LaneShiftRegistry.MeasureCurve(em, lane), 0f, LaneBits.None);
             if (m_Probe.Count >= 512) m_Probe.Clear();
             m_Probe[lane] = probe;
             return true;
@@ -274,6 +274,8 @@ namespace RealisticRoadWorks.V3.Traffic
         {
             if (IsDev) return DevLanes.TryGetValue(lane, out var ds) ? ds : LaneState.Vanilla;
             if (Level != ClosureLevel.Closed) return LaneState.Slow;
+            if (LaneShiftRegistry.Relocated(lane)) return LaneState.Slow;   // moved onto a temporary lane of the open half
+            if (LaneShiftRegistry.Retired(lane)) return LaneState.ClosedS;  // no temporary lane for it while a half is resurfaced
             var g = GroupOf(em, lane);
             if (RoadZoneMath.LaneOpen(g, Open)) return LaneState.Slow;
             if ((g & Soft) != 0 && (g & ~(Soft | Open) & RoadZones.AllLanes) == 0) return LaneState.Soft;

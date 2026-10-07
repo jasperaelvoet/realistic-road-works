@@ -46,7 +46,7 @@ namespace RealisticRoadWorks.V3.Surfaces
 
         private void ProcessTempLines(EdgeCtx c, bool rebuild, bool bypass, bool tickOpen, ref bool wrote, ref bool deferred)
         {
-            if (c.Upgrade && !UpgradeRemarkNow(c.View.Upgrade))
+            if (c.Upgrade && (!UpgradeRemarkNow(c.View.Upgrade) || HalfTempLanes(c)))
             {
                 ProcessUpgradeTempLines(c, rebuild, bypass, tickOpen, ref wrote, ref deferred);
                 return;
@@ -144,6 +144,10 @@ namespace RealisticRoadWorks.V3.Surfaces
             return false;
         }
 
+        // Traffic moved the closed half's lanes onto temporary lanes over the open half (re-marking one half at a time).
+        private static bool HalfTempLanes(EdgeCtx c) =>
+            c.Ue != null && c.Ue.TempHalfWindow >= 0 && c.Ue.TempHalfWindow == c.View.Upgrade.AppliedWindow && !float.IsNaN(c.Ue.TempHalfLo);
+
         // The re-marking is still to come, so the new white markings are covered.
         private static bool UpgradeRemarkPending(in UpgradeView u)
         {
@@ -164,6 +168,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             string why = null;
             if (!SurfacePalette.kTempMarkingOn || prefab == Entity.Null) why = "line clone not registered";
             else if (st == null || !st.TempMarkingsOn) why = "setting TempMarkings off";
+            else if (HalfTempLanes(c)) why = PlanLineSet(c.Ue.PlanFor(c.Ue.TempHalfWindow, u.AllAtOnce, c.Ue.TempHalfLo, c.Ue.TempHalfHi));
             else if (!UpgradeRemarkPending(u)) why = "no covered markings";
             else if (u.AppliedTraffic == BandTraffic.Carriageway || u.AppliedTraffic == BandTraffic.Half) why = "lanes closed";
             else why = UpgradeLineSet(c);
@@ -232,6 +237,13 @@ namespace RealisticRoadWorks.V3.Surfaces
             var cs = c.Ue.CrossSection;
             var u = c.View.Upgrade;
             int geo = c.Rec.GeometryRevision;
+            // temporary lanes of the applied window: the lines follow them (lanes moved over the old asphalt)
+            int dw = c.Ue.DropWindowFor(geo, u);
+            if (dw >= 0)
+            {
+                var plan = c.Ue.PlanFor(dw, u.AllAtOnce);
+                if (plan.SlotCount > 0 && plan.Arrangement != TempArrangement.Untouched) return PlanLineSet(plan);
+            }
             int open = 0;
             for (int k = 0; k < cs.Count; k++)
             {
@@ -265,6 +277,46 @@ namespace RealisticRoadWorks.V3.Surfaces
                 else m_UwLines.Add(new UwLine { C = x });
             }
             return m_UwLines.Count > 0 ? null : "no lane boundary to mark";
+        }
+
+        private static readonly List<float2> s_PlanLines = new List<float2>(8);
+
+        // Lines of a temporary lane plan: edge lines inside the outer slot edges, a centre line (double in the NA theme) between
+        // opposing slots, dashed lines between slots of one direction.
+        private string PlanLineSet(TempLanePlan plan)
+        {
+            m_UwLines.Clear();
+            m_UwLanes.Clear();
+            UpgradeTempLanes.Lines(plan, s_PlanLines);
+            float hw = math.max(0.02f, RRWGates.TempLineWidth) * 0.5f;
+            float inset = RRWConst.kTempLineEdgeInset + hw;
+            for (int k = 0; k < s_PlanLines.Count; k++)
+            {
+                float x = s_PlanLines[k].x;
+                int kind = (int)s_PlanLines[k].y;
+                if (kind == 0)
+                {
+                    // edge line: inside the slot run (first line of a run is its left edge)
+                    bool left = IsRunStart(k);
+                    m_UwLines.Add(new UwLine { C = left ? x + inset : x - inset });
+                }
+                else if (kind == 2) m_UwLines.Add(new UwLine { C = x, Dashed = true });
+                else if (RRWCity.NaTheme)
+                {
+                    m_UwLines.Add(new UwLine { C = x - RRWConst.kTempLineDividerOffset * 0.5f - hw });
+                    m_UwLines.Add(new UwLine { C = x + RRWConst.kTempLineDividerOffset * 0.5f + hw });
+                }
+                else m_UwLines.Add(new UwLine { C = x });
+            }
+            return m_UwLines.Count > 0 ? null : "no lane boundary to mark";
+        }
+
+        // Edge lines come in pairs per slot run (start, end): an even count of edge lines before k = k starts a run.
+        private static bool IsRunStart(int k)
+        {
+            int edges = 0;
+            for (int i = 0; i < k; i++) if ((int)s_PlanLines[i].y == 0) edges++;
+            return edges % 2 == 0;
         }
 
         // m_Desired = the pieces of one row on this edge (edge-local s, geometric).
