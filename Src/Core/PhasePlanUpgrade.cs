@@ -25,6 +25,8 @@ namespace RealisticRoadWorks.V3
         public bool ShuttleOK;               // build window: every edge keeps a lane per direction or one shared lane, and the section
                                              // can be signalled (one-lane alternating operation with portable signals)
         public bool RemarkShuttleOK;         // re-marking window: one shared lane on the open half of every edge, signals possible
+        public bool PaintOK;                 // re-marking window: on every edge every direction has two lanes or more (one closes at the
+                                             // painter, one keeps driving)
     }
 
     // One sub-strip's traffic state for the machine-safety test. Pure data.
@@ -89,6 +91,7 @@ namespace RealisticRoadWorks.V3
             {
                 case BandTraffic.Sidewalk: return 1;
                 case BandTraffic.Drop: return 2;
+                case BandTraffic.Paint: return 2;
                 case BandTraffic.Half: return 3;
                 case BandTraffic.Carriageway: return 4;
                 default: return 0;
@@ -97,6 +100,28 @@ namespace RealisticRoadWorks.V3
 
         // A primitive that controls lane groups or lanes (the project target is Closed).
         public static bool Closes(BandTraffic t) => ClosureStrength(t) > 0;
+
+        // A primitive that closes single lanes with blockers (Traffic's lane drops): Drop over the window's bands, Paint around the
+        // painter.
+        public static bool LaneDrops(BandTraffic t) => t == BandTraffic.Drop || t == BandTraffic.Paint;
+
+        // Rolling closure of a Paint window (chain u): kUwPaintBehind behind the re-marking band's front to kUwPaintAhead ahead of it,
+        // inside the trimmed chain. False when the applied window is not a re-marking window running Paint.
+        public static bool PaintZone(in ProjectView v, out float u0, out float u1)
+        {
+            u0 = u1 = 0f;
+            var u = v.Upgrade;
+            if (!u.Valid || u.InSetup || u.InTeardown || u.AppliedTraffic != BandTraffic.Paint) return false;
+            int band = -1;
+            for (int i = 0; i < u.BandCount; i++)
+                if (u.Band(i).Kind == BandKind.Remark && u.Band(i).Window == u.AppliedWindow) band = i;
+            if (band < 0) return false;
+            Trims(v, out float t0, out float t1);
+            float F = UpgradeBandFront(v, band);
+            u0 = math.max(t0, F - RRWConst.kUwPaintBehind);
+            u1 = math.min(t1, F + RRWConst.kUwPaintAhead);
+            return u1 - u0 > 1f;
+        }
 
         // A window whose primitive the Director has not decided yet (Traffic's classification, the detour verdict or the band
         // data still missing): slow zone, no lane group closed, no machine anywhere, the devices of Dressing, and its strips
@@ -107,7 +132,7 @@ namespace RealisticRoadWorks.V3
         public static bool UpgradeDressed(BandTraffic t) => t == BandTraffic.Dressing || t == BandTraffic.Undecided;
 
         private static readonly BandTraffic[] s_CarLadder = { BandTraffic.Drop, BandTraffic.Half, BandTraffic.Carriageway };
-        private static readonly BandTraffic[] s_RemarkLadder = { BandTraffic.Half, BandTraffic.Carriageway };
+        private static readonly BandTraffic[] s_RemarkLadder = { BandTraffic.Paint, BandTraffic.Half, BandTraffic.Carriageway };
 
         // Traffic primitive of a window, first rung that applies:
         //  * policy slow zone / visual only -> Dressing (the caller drops the slow zone under visual only);
@@ -118,7 +143,8 @@ namespace RealisticRoadWorks.V3
         //    houses cars reach a dropped lane from parking and driveways) -> Half (one side, a direction group can close, a
         //    detour exists, no corridor conflict, and no buildings or the buildings gate) -> Carriageway (no buildings, no cut
         //    edge) -> Dressing;
-        //  * re-marking: Half -> Carriageway -> Dressing.
+        //  * re-marking: Paint (every direction keeps a lane beside the painter: rolling blockers around it, no detour) -> Half ->
+        //    Carriageway -> Dressing.
         // After the window started its saved primitive is a ceiling: it is kept while it still applies, otherwise only a rung
         // that closes less may replace it (Dressing at worst), never one that closes more.
         // why: the reason for Dressing (None otherwise).
@@ -154,6 +180,8 @@ namespace RealisticRoadWorks.V3
             {
                 case BandTraffic.Drop:
                     return !w.RemarkWindow && w.DropGate && (w.EveryDirectionKeepsLane || w.ShuttleOK) && !w.Buildings;
+                case BandTraffic.Paint:
+                    return w.RemarkWindow && w.DropGate && w.PaintOK && !w.Buildings;
                 case BandTraffic.Half:
                     // re-marking with temporary lanes: both directions keep driving on the open half, no detour needed
                     if (w.RemarkWindow && (w.RemarkTwoWay || w.RemarkShuttleOK) && !w.CorridorConflict && (!w.Buildings || w.ClosedBGate)) return true;
@@ -534,14 +562,17 @@ namespace RealisticRoadWorks.V3
                 {
                     if (after) return;
                     var prim = u.Prim(b.Window);
-                    bool covers = prim == BandTraffic.Half || prim == BandTraffic.Carriageway || UpgradeUndecided(prim) || prim == BandTraffic.Drop;
+                    bool covers = prim == BandTraffic.Half || prim == BandTraffic.Carriageway || UpgradeUndecided(prim) || prim == BandTraffic.Drop
+                                  || prim == BandTraffic.Paint;
                     if (before)
                     {
                         // the old road (its own laterals leave out the new strips built already) carries traffic until its window
                         if (pre && covers && layer == SurfaceLayer.OldAsphaltCover) set.Add(full);
                         return;
                     }
-                    if (v.HalvesActive || layer != SurfaceLayer.FreshAsphaltCover) return;
+                    // painting: the road ahead of the painter carries no markings yet (the old ones are ground off): the plain road
+                    // surface; behind it the new markings show
+                    if (v.HalvesActive || layer != SurfaceLayer.OldAsphaltCover) return;
                     if (covers) set.Add(ahead);
                     return;
                 }
@@ -583,8 +614,12 @@ namespace RealisticRoadWorks.V3
                         || cover == SubStripCover.Terrain;
             if (after)
             {
-                // the new strip is paved: fresh asphalt (its markings stay covered) until the re-marking window starts
-                if (layer == SurfaceLayer.FreshAsphaltCover && !walk && RemarkPending(u, w)) set.Add(full);
+                // the new strip is paved: fresh asphalt (its markings stay covered) until the re-marking window, then until the
+                // painter passed
+                if (layer != SurfaceLayer.FreshAsphaltCover || walk) return;
+                if (RemarkPending(u, w)) { set.Add(full); return; }
+                int rb = RemarkBandIn(u, w);
+                if (rb >= 0) set.Add(new Span(QuantizeBand(UpgradeBandFront(v, rb), t0, t1), t1));
                 return;
             }
             // what the strip was before it is dug: the ground (a build band: grass, also under the new sidewalk) or the old
@@ -601,7 +636,7 @@ namespace RealisticRoadWorks.V3
             switch (cover)
             {
                 case SubStripCover.Traffic:
-                    if (layer == SurfaceLayer.OldAsphaltCover) set.Add(full);
+                    if (layer == SurfaceLayer.OldAsphaltCover && !u.Deferred) set.Add(full);
                     return;
                 case SubStripCover.OpenWalk:
                     if (layer != SurfaceLayer.BaseCourseCover) return;
@@ -647,6 +682,14 @@ namespace RealisticRoadWorks.V3
             }
         }
 
+        // The re-marking band whose window is w (-1 none).
+        private static int RemarkBandIn(in UpgradeView u, int w)
+        {
+            for (int i = 0; i < u.BandCount; i++)
+                if (u.Band(i).Kind == BandKind.Remark && u.Band(i).Window == w) return i;
+            return -1;
+        }
+
         // A re-marking band's window is still to come at window w.
         private static bool RemarkPending(in UpgradeView u, int w)
         {
@@ -665,15 +708,14 @@ namespace RealisticRoadWorks.V3
             var b = u.Band(band);
             p.Add(b.Lo, b.Hi);
             if (b.Kind != BandKind.Remark) return p;
-            int w = v.Phase == WorksPhase.Complete ? u.WindowCount : u.Window;
-            bool beforeRemark = w < b.Window;
             for (int i = 0; i < u.BandCount; i++)
             {
                 if (i == band) continue;
                 var o = u.Band(i);
                 if (o.Kind == BandKind.Remark) continue;
-                // not done: the band dresses its strip; done build / rebuild before the re-marking: its fresh asphalt shows
-                if (u.StateOf(i) == BandState.Done && !(beforeRemark && o.Kind != BandKind.Remove)) continue;
+                // not done: the band dresses its strip; a done build / rebuild band shows its fresh asphalt until the painter passed
+                // (UpgradeSpans); a done remove band lies outside the new road
+                if (u.StateOf(i) == BandState.Done && o.Kind == BandKind.Remove) continue;
                 p.Cut(o.Lo, o.Hi);
             }
             return p;
@@ -773,6 +815,12 @@ namespace RealisticRoadWorks.V3
                         pp.Barriers = BarrierStyle.None;
                         pp.Devices |= BandDevices.Divider | BandDevices.Taper | BandDevices.ClosedEnd | BandDevices.KerbFence;
                         pp.BandDivider = DividerStyle.Barriers;
+                        break;
+                    case BandTraffic.Paint:
+                        // a moving operation: cones along the closed lanes and a taper in front of them, no barriers or fences
+                        pp.Barriers = BarrierStyle.None;
+                        pp.Devices |= BandDevices.Divider | BandDevices.Taper | BandDevices.ClosedEnd;
+                        pp.BandDivider = DividerStyle.Cones;
                         break;
                     case BandTraffic.Sidewalk:
                         pp.Barriers = BarrierStyle.None;
@@ -912,6 +960,7 @@ namespace RealisticRoadWorks.V3
         }
 
         // The plan of crew `crew` of a mode H view: the crew works chain band UpgradeView.CrewBand(crew) over the trimmed chain.
+        //  * re-marking band under Paint: a band crew (below) in the lanes closed around the painter, Finishing roster;
         //  * re-marking band (Half / Carriageway): the C4 crew of a new road (painter + crew truck in the works half, fraction
         //    laterals, LateralMetres = false); under Dressing no crew (nothing may stand in a lane);
         //  * build / rebuild / remove band: LateralMetres = true, every lateral in metres (chain frame) inside the band's machine-safe
@@ -944,7 +993,9 @@ namespace RealisticRoadWorks.V3
             float exit = ExitU(v);
             sbyte exitFacing = ExitFacing(v);
             float lead = RRWConst.kFinisherLead, back = RRWConst.kExcavatorBack;
-            if (b.Kind == BandKind.Remark)
+            // the re-marking band painting on the move (Paint) is a band crew: painter and crew truck inside its machine-safe run (the
+            // lanes Traffic closes around the painter)
+            if (b.Kind == BandKind.Remark && u.Traffic != BandTraffic.Paint)
             {
                 c.LateralMetres = false;
                 if (u.InSetup || !(u.Traffic == BandTraffic.Half || u.Traffic == BandTraffic.Carriageway) || L < RRWConst.kMachineMinChain) return c;

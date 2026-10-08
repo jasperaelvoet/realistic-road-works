@@ -71,7 +71,9 @@ namespace RealisticRoadWorks.V3.Machines
             var v = c.ViewBase;
             var u = v.Upgrade;
             int band = c.Crew.Band;
-            bool bandCrew = c.Crew.LateralMetres && band >= 0 && band < u.BandCount && u.Band(band).Kind != BandKind.Remark;
+            // the re-marking band is a band crew too while it paints on the move (Paint: the painter keeps to its rolling closure)
+            bool bandCrew = c.Crew.LateralMetres && band >= 0 && band < u.BandCount
+                            && (u.Band(band).Kind != BandKind.Remark || u.Prim(u.Band(band).Window) == BandTraffic.Paint);
             c.LateralMetres = bandCrew;
             c.UwBand = bandCrew ? band : -1;
             c.View = v;

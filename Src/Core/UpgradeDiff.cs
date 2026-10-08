@@ -225,6 +225,14 @@ namespace RealisticRoadWorks.V3
                     changed = true;
                 }
             }
+            // 4b. a narrow rebuild left on its own (a kerb that moves by a metre: a sidewalk a little wider or narrower) is no works
+            // strip of its own: nobody fences off a lane to move a kerb by that much; the new kerb comes with the finishing
+            for (int i = entries.Count - 1; i >= 0; i--)
+                if (entries[i].C == Chg.Rebuild && entries[i].Width < RRWConst.kUwKerbShiftMax)
+                {
+                    if (trace != null) trace.Add("narrow rebuild [" + entries[i].Lo.ToString("0.##") + "," + entries[i].Hi.ToString("0.##") + "] left to the finishing");
+                    entries.RemoveAt(i);
+                }
             // 5. adjacent entries of the same kind and side merge
             changed = true;
             while (changed)
@@ -243,7 +251,28 @@ namespace RealisticRoadWorks.V3
                     }
             }
             entries.Sort((p, q) => p.Lo.CompareTo(q.Lo));
-            if (remark)
+            // every change of the carriageway is re-marked: a strip built or rebuilt into the new carriageway, or removed from the old
+            // one, leaves lines to paint even where the lane layout itself stays
+            bool repaint = remark;
+            for (int i = 0; i < entries.Count && !repaint; i++)
+            {
+                var e = entries[i];
+                if (e.C == Chg.Remark) continue;
+                float cLo = e.C == Chg.Remove ? oLo : nLo, cHi = e.C == Chg.Remove ? oHi : nHi;
+                repaint = !float.IsNaN(cLo) && math.min(e.Hi, cHi) - math.max(e.Lo, cLo) > 0.05f;
+            }
+            if (repaint && !remark)
+            {
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    var e = entries[i];
+                    if (e.C != Chg.Remove) continue;
+                    if (e.Side == BandSide.Left || e.Side == BandSide.Both || e.Side == BandSide.Middle) touchL = true;
+                    if (e.Side == BandSide.Right || e.Side == BandSide.Both || e.Side == BandSide.Middle) touchR = true;
+                }
+                if (trace != null) trace.Add("repaint: the carriageway changes, re-marking added");
+            }
+            if (repaint)
             {
                 // the re-marking also paints the new lanes of build / rebuild bands (they have no finishing of their own)
                 for (int i = 0; i < entries.Count; i++)

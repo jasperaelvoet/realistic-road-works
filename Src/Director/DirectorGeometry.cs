@@ -18,16 +18,16 @@ namespace RealisticRoadWorks.V3.Director
         {
             var em = EntityManager;
             Entity e = rec.Edge;
-            var curve = em.GetComponentData<Curve>(e);
-            rec.Arc = new EdgeArc(curve.m_Bezier);
-            st.CurveLength = curve.m_Length > 0.01f ? curve.m_Length : rec.Arc.Length;
+            var bez = WorksCurve(e, out float curveLength, out bool deferred);
+            rec.Arc = new EdgeArc(bez);
+            st.CurveLength = curveLength > 0.01f ? curveLength : rec.Arc.Length;
             st.SectionFromLanes = HasCarLanes(e);
-            rec.Section = EcsUtil.MeasureSection(em, e, rec.Arc);
+            rec.Section = MeasureWorksSection(e, rec.Arc);
             st.LaneSig = EcsUtil.LaneSignature(em, e);
             rec.SubgradeDepth = PhasePlan.SubgradeDepth(rec.Section.CompositionWidth);
-            rec.GeometryHash = GeometryHash(curve.m_Bezier, EcsUtil.CompositionWidth(em, e));
+            rec.GeometryHash = GeometryHash(bez, WorksWidth(e));
             st.Prefab = em.HasComponent<PrefabRef>(e) ? em.GetComponentData<PrefabRef>(e).m_Prefab : Entity.Null;
-            var b = curve.m_Bezier;
+            var b = bez;
             float2 mn = math.min(math.min(b.a.xz, b.b.xz), math.min(b.c.xz, b.d.xz));
             float2 mx = math.max(math.max(b.a.xz, b.b.xz), math.max(b.c.xz, b.d.xz));
             st.BoundsXZ = new float4(mn, mx);
@@ -77,6 +77,18 @@ namespace RealisticRoadWorks.V3.Director
             return k;
         }
 
+        // EcsUtil.MeasureSection; a deferred edge (the old road is live) is sized as the new road (its target layout outline).
+        private EdgeSection MeasureWorksSection(Entity e, EdgeArc arc)
+        {
+            var sec = EcsUtil.MeasureSection(EntityManager, e, arc);
+            if (!DeferredNet.TryEdge(EntityManager, e, out _)) return sec;
+            float w = WorksWidth(e);
+            sec.CompositionWidth = w;
+            sec.HalfWidth = w * 0.5f;
+            sec.FlatHalfWidth = EdgeSection.FlatHalfWidthOf(w);
+            return sec;
+        }
+
         private static uint GeometryHash(Bezier4x3 b, float width) =>
             math.hash(new float4x4(new float4(b.a, width), new float4(b.b, 1f), new float4(b.c, 2f), new float4(b.d, 3f)));
 
@@ -114,7 +126,7 @@ namespace RealisticRoadWorks.V3.Director
                 if (!st.SectionFromLanes && m_Now < st.SectionRetryUntil && HasCarLanes(e))
                 {
                     // lanes of a new road appear a frame after the road: re-measure the carriage intervals once they exist
-                    rec.Section = EcsUtil.MeasureSection(em, e, rec.Arc ?? new EdgeArc(em.GetComponentData<Curve>(e).m_Bezier));
+                    rec.Section = MeasureWorksSection(e, rec.Arc ?? new EdgeArc(WorksCurve(e, out _, out _)));
                     st.LaneSig = EcsUtil.LaneSignature(em, e);
                     rec.SubgradeDepth = PhasePlan.SubgradeDepth(rec.Section.CompositionWidth);
                     st.SectionFromLanes = true;
@@ -133,7 +145,9 @@ namespace RealisticRoadWorks.V3.Director
                     }
                 }
                 var curve = em.GetComponentData<Curve>(e);
-                uint hash = GeometryHash(curve.m_Bezier, EcsUtil.CompositionWidth(em, e));
+                curve.m_Bezier = WorksCurve(e, out float worksLen, out _);
+                curve.m_Length = worksLen;
+                uint hash = GeometryHash(curve.m_Bezier, WorksWidth(e));
                 if (hash == rec.GeometryHash)
                 {
                     try { CheckEndsAndEligibility(rec, st); }
@@ -162,7 +176,7 @@ namespace RealisticRoadWorks.V3.Director
                 st.CornerHash = ch;
                 if (rec.Arc != null)
                 {
-                    rec.Section = EcsUtil.MeasureSection(em, e, rec.Arc);
+                    rec.Section = MeasureWorksSection(e, rec.Arc);
                     st.LaneSig = EcsUtil.LaneSignature(em, e);
                     rec.SubgradeDepth = PhasePlan.SubgradeDepth(rec.Section.CompositionWidth);
                     st.SectionFromLanes = HasCarLanes(e);
@@ -200,7 +214,7 @@ namespace RealisticRoadWorks.V3.Director
             Entity e = rec.Edge;
             uint sig = EcsUtil.LaneSignature(em, e);
             if (sig == st.LaneSig) return;
-            var sec = EcsUtil.MeasureSection(em, e, rec.Arc);
+            var sec = MeasureWorksSection(e, rec.Arc);
             if (sec.Verdict == SplitVerdict.NoDriveLanes && rec.Section.LanesMeasured && rec.Section.Verdict != SplitVerdict.NoDriveLanes) return;
             st.LaneSig = sig;
             st.SectionFromLanes = HasCarLanes(e);

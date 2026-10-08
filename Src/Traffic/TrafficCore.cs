@@ -84,7 +84,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 if (Ready && Edge == edge && Arc != null && Revision == -2 - rec.GeometryRevision && ChainReversed == chainReversed &&
                     LeftHandTraffic == leftHandTraffic) return false;
                 if (!em.Exists(edge) || !em.HasComponent<Curve>(edge)) return false;
-                arc = new EdgeArc(em.GetComponentData<Curve>(edge).m_Bezier);
+                arc = new EdgeArc(DeferredNet.WorksCurve(em, edge));
                 return Sync(edge, -2 - rec.GeometryRevision, chainReversed, leftHandTraffic, arc, rec.Section);
             }
             return Sync(edge, rec.GeometryRevision, chainReversed, leftHandTraffic, arc, rec.Section);

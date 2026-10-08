@@ -76,6 +76,11 @@ namespace RealisticRoadWorks.V3.Surfaces
         public int GeomRev = int.MinValue;
         public uint EndsHash;            // node-end classification hash at the last write
         public float2 FirstXZ;           // first polygon node (binding key at Mod4)
+        // Texture anchor: the game maps an area's texture from its first node and the direction to its second, so every write
+        // starts the polygon at this fixed boundary point (SurfaceAreaSystem.AnchorPoly) and the texture never slides.
+        public bool HasAnchor;
+        public float2 AnchorXZ, AnchorDir;
+        public readonly List<float2> PrevPoly = new List<float2>(16);
         public int NodeCount;
         public uint DeferSince;          // first update a shrink was deferred by the hand-over rule (0 = not deferred)
         public float PrevLS0, PrevLS1;   // logical span before the last rewrite (what was on screen before this update)
@@ -563,6 +568,7 @@ namespace RealisticRoadWorks.V3.Surfaces
                 BaseTex = PrefabNames.TexAsphaltBase, NormalTex = PrefabNames.TexAsphaltNormal, MaskTex = PrefabNames.TexAsphaltMask,
                 Layers = DecalLayers.Terrain | DecalLayers.Roads, Priority = -89, Smoothness = SurfacePalette.kOldAsphaltSmoothness,
                 Tint = SurfacePalette.OldAsphaltCoverTint, Layer = SurfaceLayer.OldAsphaltCover, RaisedQueue = true,
+                QueueRaise = RRWConst.kRenderQueueRaise - 1,   // under the fresh asphalt cover where both lie (a new strip on the half painted)
             });
             // Upgrade works, a strip that is not dug yet (the new road already lies there): the ground it was, grass, on
             // Terrain|Roads at the raised queue so it also hides the new road surface, its kerb and its markings.

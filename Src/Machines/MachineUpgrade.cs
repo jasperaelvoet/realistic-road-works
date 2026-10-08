@@ -199,7 +199,7 @@ namespace RealisticRoadWorks.V3.Machines
             var u = v.Upgrade;
             if (pr == null || td == null || ei < 0 || ei >= td.Edges.Count || band < 0 || band >= u.BandCount) return false;
             var bv = u.Band(band);
-            if (bv.Kind == BandKind.Remark || !(bv.SafeHi > bv.SafeLo)) return false;
+            if ((bv.Kind == BandKind.Remark && u.Prim(bv.Window) != BandTraffic.Paint) || !(bv.SafeHi > bv.SafeLo)) return false;
             var rt = pr.Upgrade;
             if (rt == null || !SiteRegistry.TryGetEdge(td.Edges[ei].Edge, out var rec) || rec.Upgrade == null) return false;
             var es = rec.Upgrade;
@@ -213,7 +213,7 @@ namespace RealisticRoadWorks.V3.Machines
             float split = RoadZoneMath.DirSplitChain(rec.Section, rev);
             // dropped lanes count only while the band's own window still runs as a lane drop (a weakened window stops them at once,
             // before Traffic releases its report), outside the approach zones
-            bool drops = !nodeZone && u.Prim(bv.Window) == BandTraffic.Drop;
+            bool drops = !nodeZone && PhasePlan.LaneDrops(u.Prim(bv.Window));
             float bestOv = float.NegativeInfinity;
             int runA = -1;
             float runLo = 0f, runHi = 0f;
@@ -340,7 +340,7 @@ namespace RealisticRoadWorks.V3.Machines
             var u = v.Upgrade;
             var bv = u.Band(band);
             // (the primitive of the band's own window: a leaver of a finished window keeps its band's rule)
-            drops = forceDrop || (u.Prim(bv.Window) == BandTraffic.Drop && bv.IsBuild && bv.HasCar);
+            drops = forceDrop || (u.Prim(bv.Window) == BandTraffic.Drop && bv.IsBuild && bv.HasCar) || u.Prim(bv.Window) == BandTraffic.Paint;
             float bestLen = UwStretchPass(td, band, drops, true, ref s0, ref s1);
             if (bestLen <= 0f && forceDrop) bestLen = UwStretchPass(td, band, true, false, ref s0, ref s1);
             if (bestLen <= 0f) return false;

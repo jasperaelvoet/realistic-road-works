@@ -51,6 +51,7 @@ namespace RealisticRoadWorks.V3.Director
         public uint EligKey;                // prefab / Upgraded / Elevation / composition flags: re-run DigEligible on change
         public uint LaneSig;                // EcsUtil.LaneSignature at the last section measurement: a changed lane set re-measures
         // ---- upgrade works (mode H)
+        public uint UwDeferLanesKey;        // geometry revision / lane set the old lanes of a deferred edge were read for
         public int UwLayoutTried = int.MinValue;  // GeometryRevision the lane layout of the new road was last read for
         public uint UwKeepOutKey;           // geometry revision, building accesses and chain coordinates of the driveway keep-outs
         public uint UwChainIndexOk;         // last update UpgradeEdgeState.ChainIndex belonged to the project's runtime (rrw.check)

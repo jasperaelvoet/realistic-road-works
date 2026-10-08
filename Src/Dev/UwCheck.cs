@@ -108,7 +108,7 @@ namespace RealisticRoadWorks.V3.DevCmds
                 if (!SiteRegistry.TryGetEdge(p.Edges[e], out var er) || er.Upgrade == null) continue;
                 var es = er.Upgrade;
                 int w = es.DropWindowFor(er.GeometryRevision, u);
-                if (w < 0 || u.Prim(w) != BandTraffic.Drop || !es.DropReadyFor(er.GeometryRevision, u)) continue;
+                if (w < 0 || !PhasePlan.LaneDrops(u.Prim(w)) || !es.DropReadyFor(er.GeometryRevision, u)) continue;
                 for (int i = 0; i < u.BandCount; i++)
                 {
                     var b = u.Band(i);
@@ -176,7 +176,7 @@ namespace RealisticRoadWorks.V3.DevCmds
             if (w < 0)
                 return "stale key (window " + es.DropWindow + "/" + WindowsOf(u) + " geo " + es.DropLanesRevision + "/" + er.GeometryRevision
                        + " allAtOnce " + es.DropAllAtOnce + "/" + u.AllAtOnce + " tail " + es.DropTail + "/" + es.TailRevision + ")";
-            if (u.Prim(w) != BandTraffic.Drop) return "lanes dropped while window " + w + " runs " + u.Prim(w);
+            if (!PhasePlan.LaneDrops(u.Prim(w))) return "lanes dropped while window " + w + " runs " + u.Prim(w);
             return null;
         }
 

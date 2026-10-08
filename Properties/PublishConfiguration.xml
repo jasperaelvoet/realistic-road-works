@@ -54,14 +54,15 @@ Source code and issue tracker: https://github.com/jasperaelvoet/realistic-road-w
 	<!--Link to the forum post where the mod can be discussed-->
 	<ForumLink Value="" />
 	<!--Version of the mod-->
-	<ModVersion Value="3.2.1" />
+	<ModVersion Value="3.3.0" />
 	<!--Recommended version of the base game to use the mod-->
 	<GameVersion Value="1.6.*" />
 	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
 	<ChangeLog>
-3.2.1: road upgrades no longer look finished before the works reach a strip. The old road in use keeps a worn asphalt look with
-the yellow temporary lines, strips not dug yet show the ground (grass), and only freshly paved asphalt is black. The temporary
-lines stop before junctions instead of ending in a jog.
+3.3.0: during a road upgrade the old road, its junctions and connections stay until the works are done; the upgraded road
+appears at the finishing. Every upgrade ends with re-marking: on roads with two or more lanes per direction the painting crew
+works on the move and only the lanes beside it close over a short moving stretch. The works start right at the old kerb, small
+kerb shifts need no works, ground textures no longer slide, and the yellow lines join the road's own markings.
 	</ChangeLog>
 	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
 	<ExternalLink Type="github" Url="https://github.com/jasperaelvoet/realistic-road-works" />

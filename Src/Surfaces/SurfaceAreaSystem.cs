@@ -268,6 +268,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         private bool SpawnArea(TrackedArea t, List<float3> poly)
         {
             if (poly.Count < 3) return false;
+            AnchorPoly(t, poly);
             if (!ValidPrefab(t.Prefab))
             {
                 RRWLog.Once("surf-noprefab-" + t.Layer + "-" + t.FadePct, "surfaces: prefab for " + t.Layer + " a" + t.FadePct + " not available (archetype not valid); layer skipped");
@@ -305,6 +306,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         private bool RewriteArea(TrackedArea t, List<float3> poly)
         {
             if (poly.Count < 3 || !t.Live(m_Em) || !m_Em.HasBuffer<AreaNode>(t.Area)) return false;
+            AnchorPoly(t, poly);
             var buf = m_Em.GetBuffer<AreaNode>(t.Area);
             buf.ResizeUninitialized(poly.Count);
             for (int i = 0; i < poly.Count; i++) buf[i] = new AreaNode(poly[i], float.MinValue);
@@ -321,6 +323,68 @@ namespace RealisticRoadWorks.V3.Surfaces
             t.DeferSince = 0;
             SurfaceState.Rewrites++;
             return true;
+        }
+
+        // The game's area renderer takes an area's texture frame from its first node (origin) and the direction to the second one.
+        // A polygon whose first node moves (a shrinking piece, a front) would drag its texture along. So: the polygon is rotated
+        // (and split at the point when needed) to start at the area's anchor while that point still lies on the boundary on a
+        // side running the same way; otherwise the anchor moves once to the first node of a side the previous polygon already
+        // had (a part of the outline that did not change), else to the first node.
+        private static readonly List<float3> s_AnchorTmp = new List<float3>(64);
+
+        private static void AnchorPoly(TrackedArea t, List<float3> poly)
+        {
+            int n = poly.Count;
+            if (n < 3) return;
+            int at = -1;
+            float3 ins = default;
+            bool insert = false;
+            if (t.HasAnchor)
+            {
+                for (int i = 0; i < n && at < 0; i++)
+                {
+                    float2 a = poly[i].xz, b = poly[(i + 1) % n].xz, d = b - a;
+                    float len = math.length(d);
+                    if (len < 0.05f) continue;
+                    d /= len;
+                    if (math.dot(d, t.AnchorDir) < 0.9999f) continue;
+                    float along = math.dot(t.AnchorXZ - a, d);
+                    if (along < -0.01f || along > len - 0.05f) continue;
+                    float off = math.abs(d.x * (t.AnchorXZ.y - a.y) - d.y * (t.AnchorXZ.x - a.x));
+                    if (off > 0.02f) continue;
+                    at = i;
+                    if (along > 0.01f) { insert = true; ins = math.lerp(poly[i], poly[(i + 1) % n], along / len); }
+                }
+            }
+            if (at < 0)
+            {
+                // a side the previous polygon had too (start and end on its boundary nodes)
+                at = 0;
+                if (t.PrevPoly.Count >= 3)
+                    for (int i = 0; i < n; i++)
+                        if (OnPrev(t.PrevPoly, poly[i].xz) && OnPrev(t.PrevPoly, poly[(i + 1) % n].xz) && math.distance(poly[i].xz, poly[(i + 1) % n].xz) > 0.05f) { at = i; break; }
+                if (math.distance(poly[at].xz, poly[(at + 1) % n].xz) < 0.05f) at = 0;
+            }
+            s_AnchorTmp.Clear();
+            if (insert) s_AnchorTmp.Add(ins);
+            for (int k = 0; k < n; k++) s_AnchorTmp.Add(poly[(at + (insert ? 1 : 0) + k) % n]);
+            poly.Clear();
+            poly.AddRange(s_AnchorTmp);
+            float2 dir = poly[1].xz - poly[0].xz;
+            if (math.lengthsq(dir) > 1e-6f)
+            {
+                t.HasAnchor = true;
+                t.AnchorXZ = poly[0].xz;
+                t.AnchorDir = math.normalize(dir);
+            }
+            t.PrevPoly.Clear();
+            for (int k = 0; k < poly.Count; k++) t.PrevPoly.Add(poly[k].xz);
+        }
+
+        private static bool OnPrev(List<float2> prev, float2 p)
+        {
+            for (int k = 0; k < prev.Count; k++) if (math.distancesq(prev[k], p) < 1e-4f) return true;
+            return false;
         }
 
         // Deletes (or cancels) a tracked area. A definition made THIS update is not consumed yet (GenerateAreasSystem runs

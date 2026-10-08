@@ -375,6 +375,10 @@ namespace RealisticRoadWorks.V3
         public const float kUwDropInset = 0.2f;          // a car lane is dropped when its centre lies inside [Lo + inset, Hi - inset] of a band
         public const bool kUwShuttleHeadsOn = true;      // portable signal heads at the ends of a one-lane section (TrafficLightCar01,
                                                          // owned by the works edge: unowned, its meshes get no draw layer)
+        public const float kUwPaintBehind = 25f;         // rolling closure of the painter (Paint): metres behind its front ...
+        public const float kUwPaintAhead = 40f;          // ... and ahead of it
+        public const float kUwPaintStep = 15f;           // the closure moves on in steps of this (new blockers first, then the old ones go)
+        public const float kUwKerbShiftMax = 1.5f;       // a rebuild strip narrower than this on its own (a kerb moved) has no works
         public const float kUwLaneTaperFrom = 4f;        // temporary lanes: metres from each edge end with no shift ...
         public const float kUwLaneTaperTo = 24f;         // ... and with the full shift (the yellow lines stop here)
         public const float kUwShuttleMaxLength = 300f;   // one-lane alternating operation only over sections up to this long
@@ -413,6 +417,7 @@ namespace RealisticRoadWorks.V3
         public const bool kUwPreCoverOn = true;          // bands covered from the apply frame
         public const bool kUwNewParkingOffOn = true;     // EMPTY new parking lanes inside build bands disabled until their band opens
         public const bool kUwFootprintHoldOn = false;    // old footprint held flat after a narrowing
+        public const bool kUwDeferOn = true;             // upgrade works keep the old road state until the re-marking / completion
         public const bool kUwOldAsphaltOn = false;       // "RRW Old Asphalt" on the removed strip (else Base Course Cover until it is broken up)
 
         // ---- effect clones (verified in game)

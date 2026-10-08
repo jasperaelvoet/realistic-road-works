@@ -410,6 +410,8 @@ namespace RealisticRoadWorks.V3
         public const string UpgradeTipRemark = P + "Tooltip.Upgrade.Remark";       // "{0}" hours
         public const string UpgradeTipMixed = P + "Tooltip.Upgrade.Mixed";         // "{0}" hours, "{1}" traffic text
         public const string UpgradeTipTrafficDrop = P + "Tooltip.Upgrade.Traffic.Drop";
+        public const string UpgradeTrafficPaint = P + "UI.Upgrade.Traffic.Paint";         // "{0}" km/h
+        public const string UpgradeTipTrafficPaint = P + "Tooltip.Upgrade.Traffic.Paint";
         public const string UpgradeTipTrafficOneWay = P + "Tooltip.Upgrade.Traffic.OneWay";
         public const string UpgradeTrafficShuttle = P + "Panel.Upgrade.Traffic.Shuttle";
         public const string UpgradeTrafficHalfTwoWay = P + "Panel.Upgrade.Traffic.HalfTwoWay";
@@ -462,6 +464,7 @@ namespace RealisticRoadWorks.V3
             switch (t)
             {
                 case BandTraffic.Drop: return UpgradeTrafficLaneDrop;
+                case BandTraffic.Paint: return UpgradeTrafficPaint;
                 case BandTraffic.Half: return UpgradeTrafficOneWay;
                 case BandTraffic.Carriageway: return UpgradeTrafficClosed;
                 case BandTraffic.Sidewalk: return UpgradeTrafficSidewalk;
@@ -477,6 +480,7 @@ namespace RealisticRoadWorks.V3
             switch (t)
             {
                 case BandTraffic.Drop: return UpgradeTipTrafficDrop;
+                case BandTraffic.Paint: return UpgradeTipTrafficPaint;
                 case BandTraffic.Half: return UpgradeTipTrafficOneWay;
                 case BandTraffic.Carriageway: return UpgradeTipTrafficClosed;
                 case BandTraffic.None:
@@ -581,6 +585,8 @@ namespace RealisticRoadWorks.V3
             { UpgradeTipRemark, "Re-marking ≈ {0} · one half at a time" },
             { UpgradeTipMixed, "Rebuilding lanes ≈ {0} · {1}" },
             { UpgradeTipTrafficDrop, "temporary lanes" },
+            { UpgradeTrafficPaint, "Line painting on the move · one lane closes around the painter, traffic passes at {0} km/h" },
+            { UpgradeTipTrafficPaint, "a lane closed around the painter" },
             { UpgradeTipTrafficOneWay, "one half at a time" },
             { UpgradeTipTrafficSlow, "slow zone" },
             { UpgradeTipTrafficClosed, "road closes" },

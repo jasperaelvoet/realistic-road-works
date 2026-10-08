@@ -63,7 +63,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         private string UpgradeScar(ScarEntry sc, Entity edge, int anchorIndex)
         {
             if (!IsUpgradeSiteEdge(m_Em, edge, out var site) || !m_Em.HasComponent<Curve>(edge)) return null;
-            var curve = m_Em.GetComponentData<Curve>(edge).m_Bezier;
+            var curve = DeferredNet.WorksCurve(m_Em, edge);
             uint sig = ClipSignature(site, curve);
             int idx = sc.ClipEdges.IndexOf(edge);
             if (idx >= 0 && sc.ClipSigs[idx] == sig) return null;
@@ -238,7 +238,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         internal static bool ScarInsideUpgradeBands(EntityManager em, List<float2> poly, float4 bounds, Entity edge, float inset)
         {
             if (poly.Count < 3 || !IsUpgradeSiteEdge(em, edge, out var site) || !em.HasComponent<Curve>(edge)) return false;
-            var arc = new EdgeArc(em.GetComponentData<Curve>(edge).m_Bezier);
+            var arc = new EdgeArc(DeferredNet.WorksCurve(em, edge));
             float L = arc.Length;
             for (int b = 0; b < site.m_BandCount; b++)
             {

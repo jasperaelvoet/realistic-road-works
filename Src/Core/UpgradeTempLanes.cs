@@ -370,6 +370,33 @@ namespace RealisticRoadWorks.V3
             }
         }
 
+        // Lateral shift of the plan at x (a line between temporary lanes): the shifts of the open lanes interpolated between their
+        // targets, the nearest lane's beyond them. x - ShiftAt(x) is where that line meets the road's own markings, at the edge ends
+        // where the lanes are back (TrafficLaneShift tapers).
+        public static float ShiftAt(TempLanePlan p, float x)
+        {
+            int lo = -1, hi = -1;
+            float tl = float.MinValue, th = float.MaxValue;
+            for (int i = 0; i < p.LaneCount; i++)
+            {
+                if (p.LaneSlot[i] < 0) continue;
+                float t = p.LaneTarget[i];
+                if (t <= x && t > tl) { tl = t; lo = i; }
+                if (t >= x && t < th) { th = t; hi = i; }
+            }
+            if (lo < 0 && hi < 0) return 0f;
+            float sl = lo >= 0 ? Shift(p, lo) : 0f, sh = hi >= 0 ? Shift(p, hi) : 0f;
+            if (lo < 0) return sh;
+            if (hi < 0 || th - tl < 1e-3f) return lo >= 0 && hi >= 0 ? (sl + sh) * 0.5f : sl;
+            return math.lerp(sl, sh, (x - tl) / (th - tl));
+        }
+
+        private static float Shift(TempLanePlan p, int i)
+        {
+            float d = p.LaneTarget[i] - p.LaneCentre[i];
+            return math.abs(d) < kMinShift ? 0f : d;
+        }
+
         private static void AddSlotAt(TempLanePlan p, int lane)
         {
             float w = p.LaneWidth[lane];

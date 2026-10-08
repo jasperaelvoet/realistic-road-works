@@ -81,6 +81,9 @@ namespace RealisticRoadWorks.V3.Tooling
             public bool Rushed;          // merged from rushed works: the new project starts rushed
         }
 
+        // originals that got partial upgrade works in this apply (kept entities), with the new layout read for them
+        public readonly Dictionary<Entity, CompositionLayout> DeferTargets = new Dictionary<Entity, CompositionLayout>();
+
         private readonly UpgradeLayoutRead m_Neu = new UpgradeLayoutRead();
         private readonly UpgradeLayoutRead m_Old = new UpgradeLayoutRead();
         private readonly List<Pending> m_Pending = new List<Pending>();
@@ -101,6 +104,7 @@ namespace RealisticRoadWorks.V3.Tooling
         public void Begin()
         {
             m_Pending.Clear();
+            DeferTargets.Clear();
             m_EndIds.Clear();
             Sites = Remark = Widen = Narrow = Mixed = Structural = Cosmetic = Instant = Rebuild = Merged = Reverted = PaidOnly = Failed = 0;
             Array.Clear(m_Why, 0, m_Why.Length);
@@ -296,6 +300,12 @@ namespace RealisticRoadWorks.V3.Tooling
         private void Add(EntityManager em, Entity temp, Entity target, int paid, bool buildings, in UpgradeSpec spec, bool rushed)
         {
             var fe = ToolUtil.FactoryEdge(em, temp, paid, buildings, target);
+            if (target != Entity.Null && m_Neu.L.Readable)
+            {
+                var copy = new CompositionLayout();
+                copy.CopyFrom(m_Neu.L);
+                DeferTargets[target] = copy;
+            }
             fe.Buildings = buildings;
             fe.KeepsLanes = m_Neu.L.Readable && UpgradeLanes.EveryDirectionKeepsLane(m_Neu.L, spec);
             m_Pending.Add(new Pending

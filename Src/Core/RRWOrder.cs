@@ -17,6 +17,7 @@ namespace RealisticRoadWorks.V3
         public const int WorksTag = 110;              // Tools: Before ApplyNetSystem
 
         // Modification1 (all Before Game.Tools.GenerateAreasSystem, in this order)
+        public const int DeferredNet = 205;           // Tools: deferred upgrades (old road back after an apply, target state at the finishing)
         public const int Director = 210;              // Director (registry rebuild first: sets NextProjectId)
         public const int LegacyMigration = 215;       // Persistence: after the Director rebuild; its sites are picked up next frame
         public const int TrafficRequests = 220;       // Traffic

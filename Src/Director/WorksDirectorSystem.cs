@@ -205,6 +205,7 @@ namespace RealisticRoadWorks.V3.Director
             UpdateCity();                                               // RRWCity (left-hand traffic, NA theme)
             if (!SiteRegistry.Loaded) Rebuild();                       // first game frame after a load
             RegisterNewSites();                                         // sites created this frame
+            RefreshDeferred();                                          // deferred upgrades: projects still on their old roads
             Run(m_GuardPreview, m_StepPreview);                         // temps that PreviewHide hid became permanent
             DetectLostSites();                                          // lost / re-keyed sites
             RefreshRecordList();

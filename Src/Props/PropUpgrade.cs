@@ -160,6 +160,7 @@ namespace RealisticRoadWorks.V3.Props
             var rec = ce.Record;
             int geo = rec.GeometryRevision;
             var lane = WholeLane(es, s);
+            if (es.NotLiveYet(lane)) return StripState.Ready;   // deferred: a lane of the new road that does not exist yet
             if ((lane.Kind == SubKind.DriveLane || lane.Kind == SubKind.Bike) && es.DroppedIn(geo, u, lane.Lo, lane.Hi, -1, false))
             {
                 drop = true;

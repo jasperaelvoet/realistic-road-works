@@ -142,6 +142,7 @@ namespace RealisticRoadWorks.V3
             var zone = OfSubStrip(s, rev, RoadZoneMath.DirSplitChain(rec.Section, rev)) & RoadZones.AllLanes;
             if (zone != RoadZones.None && (zone & ~u.AppliedZones) == 0 && rec.ClosureApplied == ClosureLevel.Closed
                 && (rec.OpenLanesApplied & zone) == 0) return true;
+            if (ue.NotLiveYet(s)) return true;
             if (s.Kind != SubKind.DriveLane && s.Kind != SubKind.Bike) return false;
             return ue.DroppedIn(rec.GeometryRevision, u, s.Lo, s.Hi, savedBand) || ue.TempLaneFree(rec.GeometryRevision, u, s.Lo, s.Hi);
         }
@@ -177,6 +178,7 @@ namespace RealisticRoadWorks.V3
                 st.DropReady = true;
                 st.DropIntrusion = ue.DropIntrusion;
             }
+            if (ue.NotLiveYet(s)) st.DropReady = true;   // a lane of the new road that does not exist yet: nothing drives there
             st.ParkingOff = SubStripParkingOff(rec, s);
             return st;
         }
@@ -208,6 +210,52 @@ namespace RealisticRoadWorks.V3
         public int SubStripsTail = -1;       // TailRevision they were cut for
         public bool SubStripsFromLayout;     // cut from Layout (else from the EdgeSection approximation)
         public readonly List<SubStrip> CrossSection = new List<SubStrip>(16);  // the whole road, same source (lane counts per direction)
+        // Deferred upgrade (RRWDeferredNet on the edge): the old road is live, so traffic plans its temporary lanes from the OLD road:
+        // its drive and parking lanes measured in the new road's frame (the old asphalt; the new one only drives once switched,
+        // the old road's kerbs, trees and lights still stand elsewhere). Empty when not deferred.
+        public readonly List<SubStrip> TrafficSection = new List<SubStrip>(16);
+        public int TrafficSectionRevision;
+        public bool Deferred;
+        public List<SubStrip> TrafficCs => Deferred && TrafficSection.Count > 0 ? TrafficSection : CrossSection;
+
+        public void SetTrafficLanes(List<LaneProbe> oldLanes)
+        {
+            TrafficSection.Clear();
+            for (int i = 0; i < oldLanes.Count; i++)
+            {
+                var l = oldLanes[i];
+                if (SameLane(l)) continue;   // a lane split into pieces along the edge, or a tram on a car lane
+                if (l.IsThrough) TrafficSection.Add(new SubStrip { Lo = l.Centre - l.HalfWidth, Hi = l.Centre + l.HalfWidth, Kind = SubKind.DriveLane, Dir = l.Dir });
+                else if (l.Has(LaneBits.Parking) && l.IsAlong) TrafficSection.Add(new SubStrip { Lo = l.Centre - l.HalfWidth, Hi = l.Centre + l.HalfWidth, Kind = SubKind.NewParking });
+            }
+            TrafficSection.Sort((x, y) => x.Lo.CompareTo(y.Lo));
+            TrafficSectionRevision++;
+        }
+
+        // Deferred: a lane-type sub-strip of the new road that no old lane overlaps (by more than half a metre) does not exist yet,
+        // so it never carries traffic (it is works ground from its window on).
+        public bool NotLiveYet(in SubStrip s)
+        {
+            if (!Deferred || TrafficSection.Count == 0) return false;
+            if (s.Kind != SubKind.DriveLane && s.Kind != SubKind.Bike && s.Kind != SubKind.NewParking) return false;
+            for (int k = 0; k < TrafficSection.Count; k++)
+            {
+                var t = TrafficSection[k];
+                if (math.min(t.Hi, s.Hi) - math.max(t.Lo, s.Lo) > 0.5f) return false;
+            }
+            return true;
+        }
+
+        private bool SameLane(in LaneProbe l)
+        {
+            for (int k = 0; k < TrafficSection.Count; k++)
+            {
+                var t = TrafficSection[k];
+                bool drive = t.Kind == SubKind.DriveLane;
+                if (drive == l.IsThrough && (!drive || t.Dir == l.Dir) && math.abs((t.Lo + t.Hi) * 0.5f - l.Centre) < LaneSection.kSameLanePosition) return true;
+            }
+            return false;
+        }
         // Optional: the live layout of the new road (Director: UpgradeLayoutReader.Read of the edge in its own curve's frame, once
         // per GeometryRevision). When it is set for the current revision, sub-strips come from it (sidewalks, verges, bike lanes
         // exact); otherwise from the section.
@@ -238,6 +286,9 @@ namespace RealisticRoadWorks.V3
         public uint DropReportUpdate;        // RRWClock.UpdateIndex of the report (0 = never)
 
         // The drop report belongs to this geometry, layout window and AllAtOnce state (and the current tail).
+        // The drop report is a Paint window's rolling closure (Traffic): the listed lanes are the ones next to the lines painted now.
+        public bool DropPaint;
+
         public bool DropCurrent(int geometryRevision, int layoutWindow, bool allAtOnce) =>
             DropWindow >= 0 && DropWindow == layoutWindow && DropLanesRevision == geometryRevision && DropAllAtOnce == allAtOnce
             && DropTail == TailRevision;
@@ -420,12 +471,14 @@ namespace RealisticRoadWorks.V3
         public TempLanePlan PlanFor(int window, bool allAtOnce, float extraLo = float.NaN, float extraHi = float.NaN)
         {
             if (m_PlanGeo == SubStripsRevision && m_PlanTail == TailRevision && m_PlanWindow == window && m_PlanAao == allAtOnce
-                && m_PlanCs == CrossSection.Count && SameF(m_PlanXLo, extraLo) && SameF(m_PlanXHi, extraHi)) return TempPlan;
-            UpgradeTempLanes.Plan(CrossSection, Bands, BandCount, window, allAtOnce, TempPlan, extraLo, extraHi);
+                && m_PlanCs == CsKey && SameF(m_PlanXLo, extraLo) && SameF(m_PlanXHi, extraHi)) return TempPlan;
+            UpgradeTempLanes.Plan(TrafficCs, Bands, BandCount, window, allAtOnce, TempPlan, extraLo, extraHi);
             m_PlanGeo = SubStripsRevision; m_PlanTail = TailRevision; m_PlanWindow = window; m_PlanAao = allAtOnce;
-            m_PlanCs = CrossSection.Count; m_PlanXLo = extraLo; m_PlanXHi = extraHi;
+            m_PlanCs = CsKey; m_PlanXLo = extraLo; m_PlanXHi = extraHi;
             return TempPlan;
         }
+
+        private int CsKey => Deferred && TrafficSection.Count > 0 ? 100000 + TrafficSectionRevision * 64 + TrafficSection.Count : CrossSection.Count;
 
         private static bool SameF(float a, float b) => (float.IsNaN(a) && float.IsNaN(b)) || a == b;
 
@@ -536,6 +589,16 @@ namespace RealisticRoadWorks.V3
         // the band is the window's build / rebuild band holding the lane, else the nearest one. -1 = not dropped.
         public int DropBandOf(float laneCentreEdge, int window, bool allAtOnce)
         {
+            if (DropPaint && window == DropWindow)
+            {
+                // Paint: the lanes Traffic closes around the painter belong to the window's re-marking band
+                bool listed = false;
+                for (int i = 0; i < DropLaneCentres.Count && !listed; i++) listed = math.abs(DropLaneCentres[i] - laneCentreEdge) < 0.5f;
+                if (!listed) return -1;
+                for (int i = 0; i < BandCount; i++)
+                    if (Bands[i].Kind == BandKind.Remark && Bands[i].Window == window) return i;
+                return -1;
+            }
             var plan = PlanFor(window, allAtOnce);
             bool planned = plan.LaneCount > 0;   // no cross-section yet: the lanes inside the window's bands
             if (planned && !plan.Dropped(laneCentreEdge)) return -1;
@@ -562,9 +625,24 @@ namespace RealisticRoadWorks.V3
             return false;
         }
 
+        // Paint: every travel direction of the new road (this edge's cross-section) has two drive lanes or more; a one-way road counts
+        // its one direction.
+        public bool PaintLanes()
+        {
+            int f = 0, b = 0;
+            for (int k = 0; k < CrossSection.Count; k++)
+            {
+                var s = CrossSection[k];
+                if (s.Kind != SubKind.DriveLane || s.Dir == 0) continue;
+                if (s.Dir > 0) f++; else b++;
+            }
+            if (f + b == 0) return false;
+            return (f == 0 || f >= 2) && (b == 0 || b >= 2);
+        }
+
         // Every direction keeps a drive lane outside the build bands of `window` (on this edge's cross-section).
         public bool KeepsLaneEachDirection(int window) =>
-            EveryDirectionKeepsLaneOf(CrossSection, Bands, BandCount, window);
+            EveryDirectionKeepsLaneOf(TrafficCs, Bands, BandCount, window);
 
         private static bool EveryDirectionKeepsLaneOf(List<SubStrip> cs, UpgradeBand[] bands, int n, int window) =>
             UpgradeLanes.EveryDirectionKeepsLane(cs, bands, n, window);
@@ -642,6 +720,9 @@ namespace RealisticRoadWorks.V3
         private bool m_Built, m_Same, m_PrevDerived, m_EveryAllAtOnce;
 
         public bool PreCover => (SavedFlags & UpgradeFlags.PreCover) != 0;
+        // The project's roads keep their old state in the game (RRWDeferredNet; Director, every update): the old road is real, so
+        // nothing paints it (no pre-covers, no old-asphalt look over the lanes in use).
+        public bool Deferred;
 
         // HasCar / SafeLo / SafeHi belong to the current bands.
         public bool DerivedFresh => DerivedRevision == Revision;
@@ -867,7 +948,8 @@ namespace RealisticRoadWorks.V3
                 P = p,
                 Schedule = Schedule,
                 AllAtOnce = AllAtOnce,
-                PreCover = PreCover,
+                PreCover = PreCover && !Deferred,
+                Deferred = Deferred,
                 PreClosed = PreClosed,
                 MachineSafe = MachineSafe,
                 BandCount = (byte)math.min(Bands.Count, RRWConst.kUwMaxChainBands),

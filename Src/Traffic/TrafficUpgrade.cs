@@ -78,6 +78,11 @@ namespace RealisticRoadWorks.V3.Traffic
         // (0 = never). Kept for the project that dropped the lane before, when another project dropped it again.
         public uint SeenSim, RollersSim;
         public uint PrevProjectId, PrevSeenSim, PrevRollersSim;
+        // Paint: the stretch the markers were placed for, and a move in progress (markers ahead added at MoveUpdate; the ones
+        // behind go once the new ones registered)
+        public float ZoneS0 = float.NaN, ZoneS1 = float.NaN;
+        public bool Moving;
+        public uint MoveUpdate;
     }
 
     // Upgrade-works traffic state of one edge. Global (TrafficState.Upgrade, keyed by edge): released markers outlive the registry
@@ -110,6 +115,11 @@ namespace RealisticRoadWorks.V3.Traffic
         // carries its markers); the drain check and DropSafeU0/U1 use it
         public float SafeS0 = float.NaN, SafeS1 = float.NaN;
         public string SafeWhy = "";       // why no range is written while the drop is applied (empty otherwise)
+        // Paint (re-marking on the move): the drop is the painter's rolling closure; PaintS0/S1 = where it wants the blockers now
+        // (EDGE-frame arc distances, inside the node setbacks); PaintOn = that stretch lies on this edge
+        public bool Paint, PaintOn;
+        public uint PaintKey;             // lane pieces the stretch covered at the last resolve
+        public float PaintS0 = float.NaN, PaintS1 = float.NaN;
 
         public bool HasAnything => Lanes.Count > 0 || ParkingOff.Count > 0 || Want;
 
@@ -143,10 +153,10 @@ namespace RealisticRoadWorks.V3.Traffic
 
     public static class UpgradeTraffic
     {
-        private struct DriveLane { public Entity Lane; public float Centre, HalfWidth; public sbyte Dir; public bool Dropped; }
+        private struct DriveLane { public Entity Lane; public float Centre, HalfWidth, S0, S1; public sbyte Dir; public bool Dropped; }
         private struct OtherLane { public Bezier4x3 Curve; public float HalfWidth; }
         private struct MachinePos { public float3 Pos; public quaternion Rot; public bool HasBox; public Bounds3 Box; public uint ProjectId; }
-        private sealed class ViewCache { public uint Update; public bool Upgrade; public UpgradeView View; }
+        private sealed class ViewCache { public uint Update; public bool Upgrade; public UpgradeView View; public bool PaintOn; public float PaintU0, PaintU1; }
 
         private static readonly List<Entity> s_Lanes = new List<Entity>(32);
         private static readonly List<Entity> s_Tmp = new List<Entity>(8);
@@ -212,11 +222,34 @@ namespace RealisticRoadWorks.V3.Traffic
             {
                 c.Update = upd;
                 // the project view: its Applied* fields follow the switch step (the previous window stays applied while its machines leave)
-                c.View = proj.View().Upgrade;
+                var pv = proj.View();
+                c.View = pv.Upgrade;
                 c.Upgrade = c.View.WindowCount > 0;
+                c.PaintOn = c.Upgrade && PhasePlan.PaintZone(pv, out c.PaintU0, out c.PaintU1);
             }
             uv = c.View;
             return c.Upgrade;
+        }
+
+        // The painter's rolling closure of a Paint window on one edge (EDGE-frame arc distances inside the node setbacks). False when
+        // the project's closure does not reach this edge's interior.
+        private static bool PaintStretch(EntityManager em, ProjectRecord proj, EdgeUpgradeTraffic et, EdgeArc arc, in RoadWorksRuntime rt, out float s0, out float s1)
+        {
+            s0 = s1 = float.NaN;
+            if (proj == null || arc == null || !s_Views.TryGetValue(proj.Id, out var c) || !c.PaintOn) return false;
+            float cu0 = rt.m_ChainU0, cu1 = rt.m_ChainU1;
+            if (em.HasComponent<RoadWorksSite>(et.Edge))
+            {
+                var site = em.GetComponentData<RoadWorksSite>(et.Edge);
+                if (math.abs(site.m_ChainU1 - site.m_ChainU0) > 1e-3f) { cu0 = site.m_ChainU0; cu1 = site.m_ChainU1; }
+            }
+            if (!(math.abs(cu1 - cu0) > 1e-3f)) return false;
+            float L = arc.Length;
+            float a = (c.PaintU0 - cu0) / (cu1 - cu0) * L, b = (c.PaintU1 - cu0) / (cu1 - cu0) * L;
+            float setback = RRWConst.kUwBlockerNodeSetback;
+            s0 = math.max(math.min(a, b), setback);
+            s1 = math.min(math.max(a, b), L - setback);
+            return s1 - s0 >= RRWConst.kUwPaintStep;
         }
 
         private static EdgeArc ArcOf(EntityManager em, EdgeUpgradeTraffic et, EdgeRecord rec)
@@ -226,7 +259,7 @@ namespace RealisticRoadWorks.V3.Traffic
             if (et.OwnArc == null || et.OwnArcRevision != revision)
             {
                 if (!em.Exists(et.Edge) || !em.HasComponent<Curve>(et.Edge)) return et.OwnArc;
-                et.OwnArc = new EdgeArc(em.GetComponentData<Curve>(et.Edge).m_Bezier);
+                et.OwnArc = new EdgeArc(DeferredNet.WorksCurve(em, et.Edge));
                 et.OwnArcRevision = revision;
             }
             return et.OwnArc;
@@ -268,7 +301,7 @@ namespace RealisticRoadWorks.V3.Traffic
             if (!RRWGates.UpgradeDrop) return "lane drops switched off";
             if (proj.Releasing || proj.Phase == WorksPhase.Complete) return "works complete";
             if (rt.m_ClosureTarget == ClosureLevel.Open) return "road open";
-            if (uv.AppliedTraffic != BandTraffic.Drop && !(uv.AllAtOnce && !uv.InTeardown && LaterDrop(uv))) return "window runs as " + uv.AppliedTraffic;
+            if (!PhasePlan.LaneDrops(uv.AppliedTraffic) && !(uv.AllAtOnce && !uv.InTeardown && LaterDrop(uv))) return "window runs as " + uv.AppliedTraffic;
             int buildings = Math.Max(slot != null ? slot.Buildings : 0, rec.BuildingCount);
             if (buildings > 0)
             {
@@ -299,10 +332,14 @@ namespace RealisticRoadWorks.V3.Traffic
             bool want = why == null;
             int lw = want ? uv.AppliedWindow : -2;
             bool aao = h && uv.AllAtOnce;
+            bool paint = want && uv.AppliedTraffic == BandTraffic.Paint;
+            bool paintOn = paint && PaintStretch(em, proj, et, arc, rt, out et.PaintS0, out et.PaintS1);
+            if (!paintOn) et.PaintS0 = et.PaintS1 = float.NaN;
             bool lanesDied = false;
             for (int i = 0; i < st.DropLanes.Count && !lanesDied; i++) lanesDied = !TrafficUtil.Alive(em, st.DropLanes[i]);
             bool keyChanged = !et.Resolved || et.Want != want || et.Geo != rec.GeometryRevision || et.Window != lw || et.AllAtOnce != aao ||
-                              et.Tail != st.TailRevision || lanesDied || (want && !st.DropCurrent(rec.GeometryRevision, lw, aao));
+                              et.Tail != st.TailRevision || lanesDied || (want && !st.DropCurrent(rec.GeometryRevision, lw, aao))
+                              || et.Paint != paint || et.PaintOn != paintOn || (paintOn && et.PaintKey != PaintPieceKey(em, et, arc));
             if (!want)
             {
                 // re-marking one half at a time: the closed half's lanes drive on temporary lanes over the open half
@@ -342,9 +379,11 @@ namespace RealisticRoadWorks.V3.Traffic
                 et.AllAtOnce = aao;
                 et.Tail = st.TailRevision;
                 et.Why = why;
+                et.Paint = et.PaintOn = false;
+                st.DropPaint = false;
                 return;
             }
-            if (keyChanged) Resolve(em, et, rec, st, slot, arc, lw, aao, upd);
+            if (keyChanged) Resolve(em, et, rec, st, slot, arc, lw, aao, upd, paint, paintOn);
             // temporary lanes first: markers go onto the moved curves once every lane of the edge arrived
             bool settled = TrafficLaneShift.Sync(em, et.Edge, arc, et.Why.Length == 0 ? st.PlanFor(lw, aao) : null, MarkerLanes(et),
                                                  MarkerPositions(em, et), RRWClock.SimFrame);
@@ -363,7 +402,7 @@ namespace RealisticRoadWorks.V3.Traffic
         // Re-resolves the dropped lanes for the current key and syncs the lane records (new lanes pending, lanes no longer dropped
         // released). Writes the key; a changed lane set resets DropApplied, BlockersRegistered and DropCleanChecks.
         private static void Resolve(EntityManager em, EdgeUpgradeTraffic et, EdgeRecord rec, UpgradeEdgeState st, TrafficEdgeSlot slot, EdgeArc arc,
-                                    int lw, bool aao, uint upd)
+                                    int lw, bool aao, uint upd, bool paint, bool paintOn)
         {
             s_Drive.Clear();
             TrafficUtil.LanesInto(em, et.Edge, s_Lanes);
@@ -377,10 +416,21 @@ namespace RealisticRoadWorks.V3.Traffic
                 var bits = probe.Bits;
                 if ((bits & LaneBits.Car) == 0 || (bits & (LaneBits.Master | LaneBits.Parking | LaneBits.BikeOnly | LaneBits.Twoway | LaneBits.Point)) != 0) continue;
                 if (!probe.IsDrive) continue;
-                bool dropped = st.DropBandOf(probe.Centre, lw, aao) >= 0;
-                s_Drive.Add(new DriveLane { Lane = lane, Centre = probe.Centre, HalfWidth = probe.HalfWidth, Dir = probe.Dir, Dropped = dropped });
+                bool dropped = !paint && st.DropBandOf(probe.Centre, lw, aao) >= 0;
+                PieceRange(em, lane, arc, out float ps0, out float ps1);
+                s_Drive.Add(new DriveLane { Lane = lane, Centre = probe.Centre, HalfWidth = probe.HalfWidth, S0 = ps0, S1 = ps1, Dir = probe.Dir, Dropped = dropped });
                 if (probe.Dir > 0) { hasF = true; keepF |= !dropped; }
                 else if (probe.Dir < 0) { hasB = true; keepB |= !dropped; }
+            }
+            if (paint)
+            {
+                // the painter's rolling closure: per travel direction with two lanes or more, the lane next to the line painted (the
+                // one nearest the direction split; on a one-way road the one nearest the middle), only while the closure reaches
+                // this edge
+                PaintLanes(paintOn, et.PaintS0, et.PaintS1);
+                keepF = keepB = true;
+                for (int i = 0; i < s_Drive.Count; i++) if (s_Drive[i].Dropped) { if (s_Drive[i].Dir > 0) keepF = false; else keepB = false; }
+                for (int i = 0; i < s_Drive.Count; i++) if (!s_Drive[i].Dropped) { if (s_Drive[i].Dir > 0) keepF = true; else keepB = true; }
             }
             string none = null;
             if ((hasF && !keepF) || (hasB && !keepB))
@@ -453,6 +503,7 @@ namespace RealisticRoadWorks.V3.Traffic
                 ClearSafeRange(et, st);
                 et.LoggedReady = false;
             }
+            st.DropPaint = paint;
             st.DropLanesRevision = rec.GeometryRevision;
             st.DropWindow = lw;
             st.DropAllAtOnce = aao;
@@ -464,15 +515,106 @@ namespace RealisticRoadWorks.V3.Traffic
             et.Window = lw;
             et.AllAtOnce = aao;
             et.Tail = st.TailRevision;
+            et.Paint = paint;
+            et.PaintOn = paintOn;
+            et.PaintKey = paintOn ? PaintPieceKey(em, et, arc) : 0u;
             et.Why = none ?? "";
             et.NextCheck = upd + (uint)RRWConst.kDrainCheckUpdates;
             if (changed)
             {
                 s_Sb.Clear();
+                if (paint) s_Sb.Append("painter ");
                 for (int i = 0; i < s_Drive.Count; i++) if (s_Drive[i].Dropped) s_Sb.Append(s_Sb.Length > 0 ? "," : "").Append(RRWLog.F(s_Drive[i].Centre));
                 RRWLog.Info("traffic p" + rec.ProjectId + " e" + rec.Edge.Index + " lane drop window " + lw + (aao ? " (all at once)" : "") + ": " +
                             (none != null ? "none (" + none + ")" : st.DropLanes.Count + " lane(s) at lateral [" + s_Sb + "] of " + s_Drive.Count + " drive lanes") +
                             " geo=" + rec.GeometryRevision + " tail=" + st.TailRevision);
+            }
+        }
+
+        // Paint: marks in s_Drive the lanes that close around the painter (none while the closure is off this edge). Per direction
+        // with two lanes or more, every piece of the lane nearest the direction split (one-way: nearest the middle of its lanes).
+        private static void PaintLanes(bool on, float zs0, float zs1)
+        {
+            for (int i = 0; i < s_Drive.Count; i++) { var d = s_Drive[i]; d.Dropped = false; s_Drive[i] = d; }
+            if (!on) return;
+            float maxF = float.MinValue, minF = float.MaxValue, maxB = float.MinValue, minB = float.MaxValue;
+            int nF = 0, nB = 0;
+            for (int i = 0; i < s_Drive.Count; i++)
+            {
+                var d = s_Drive[i];
+                if (d.Dir > 0) { maxF = math.max(maxF, d.Centre); minF = math.min(minF, d.Centre); }
+                else if (d.Dir < 0) { maxB = math.max(maxB, d.Centre); minB = math.min(minB, d.Centre); }
+            }
+            CountPositions(1, out nF);
+            CountPositions(-1, out nB);
+            float split;
+            if (nF > 0 && nB > 0) split = maxF < minB ? (maxF + minB) * 0.5f : (maxB + minF) * 0.5f;
+            else if (nF > 0) split = (minF + maxF) * 0.5f;
+            else split = (minB + maxB) * 0.5f;
+            for (int dir = -1; dir <= 1; dir += 2)
+            {
+                int n = dir > 0 ? nF : nB;
+                if (n < 2) continue;
+                float best = float.NaN, bd = float.MaxValue;
+                for (int i = 0; i < s_Drive.Count; i++)
+                {
+                    if (s_Drive[i].Dir != dir) continue;
+                    float dd = math.abs(s_Drive[i].Centre - split);
+                    if (dd < bd) { bd = dd; best = s_Drive[i].Centre; }
+                }
+                // a lane made of several pieces along the edge: only the pieces the painter's stretch covers
+                for (int i = 0; i < s_Drive.Count; i++)
+                {
+                    if (s_Drive[i].Dir != dir || math.abs(s_Drive[i].Centre - best) > LaneSection.kSameLanePosition) continue;
+                    if (!PieceInStretch(s_Drive[i].S0, s_Drive[i].S1, zs0, zs1)) continue;
+                    var d = s_Drive[i]; d.Dropped = true; s_Drive[i] = d;
+                }
+            }
+        }
+
+        // EDGE-frame arc range a lane piece covers.
+        private static void PieceRange(EntityManager em, Entity lane, EdgeArc arc, out float s0, out float s1)
+        {
+            var bez = LaneShiftRegistry.MeasureCurve(em, lane);
+            float a = arc.Project(bez.a), b = arc.Project(bez.d);
+            s0 = math.min(a, b);
+            s1 = math.max(a, b);
+        }
+
+        // The piece carries at least one marker station of the stretch (kBlockerNodeClear inside its ends).
+        private static bool PieceInStretch(float p0, float p1, float zs0, float zs1)
+        {
+            float lo = math.max(p0 + RRWConst.kBlockerNodeClear, zs0), hi = math.min(p1 - RRWConst.kBlockerNodeClear, zs1);
+            return hi - lo > 1f;
+        }
+
+        // Which pieces of the edge's lanes the painter's stretch covers now (a changed set re-resolves the drop).
+        private static uint PaintPieceKey(EntityManager em, EdgeUpgradeTraffic et, EdgeArc arc)
+        {
+            if (float.IsNaN(et.PaintS0)) return 0u;
+            uint h = 17u;
+            TrafficUtil.LanesInto(em, et.Edge, s_Lanes);
+            for (int i = 0; i < s_Lanes.Count; i++)
+            {
+                var lane = s_Lanes[i];
+                if (!TrafficUtil.Alive(em, lane) || !em.HasComponent<NetCarLane>(lane) || em.HasComponent<NetMasterLane>(lane)) continue;
+                PieceRange(em, lane, arc, out float p0, out float p1);
+                if (PieceInStretch(p0, p1, et.PaintS0, et.PaintS1)) h = h * 31u + (uint)lane.Index;
+            }
+            return h;
+        }
+
+        // Lane positions (pieces of one lane counted once) of a travel direction in s_Drive.
+        private static void CountPositions(int dir, out int n)
+        {
+            n = 0;
+            for (int i = 0; i < s_Drive.Count; i++)
+            {
+                if (s_Drive[i].Dir != dir) continue;
+                bool seen = false;
+                for (int j = 0; j < i && !seen; j++)
+                    seen = s_Drive[j].Dir == dir && math.abs(s_Drive[j].Centre - s_Drive[i].Centre) < LaneSection.kSameLanePosition;
+                if (!seen) n++;
             }
         }
 
@@ -569,6 +711,7 @@ namespace RealisticRoadWorks.V3.Traffic
                         if (ld.StageUpdate != upd) CheckBlockage(em, et, rec, ld, upd);
                         break;
                     case DropStage.Active:
+                        PaintMove(em, world, et, rec, ld, arc, upd);
                         int lost = 0;
                         for (int k = 0; k < ld.Markers.Count; k++) if (!LaneClosureMarkers.Alive(em, ld.Markers[k])) lost++;
                         if (lost > 0)
@@ -797,26 +940,18 @@ namespace RealisticRoadWorks.V3.Traffic
                 return;
             }
             var bez = em.GetComponentData<Curve>(ld.Lane).m_Bezier;
-            float laneLen = MathUtils.Length(bez);
-            Stations(arc.Length, RRWConst.kUwBlockerNodeSetback, RRWConst.kBlockerSpacing, s_Stations);
+            if (et.Paint) PaintStations(et, s_Stations);
+            else Stations(arc.Length, RRWConst.kUwBlockerNodeSetback, RRWConst.kBlockerSpacing, s_Stations);
             int tooClose = 0, made = 0;
             for (int k = 0; k < s_Stations.Count; k++)
             {
-                float3 ap = arc.Position(s_Stations[k]);
-                MathUtils.Distance(bez, ap, out float t);
-                if (t <= 0.001f || t >= 0.999f) continue;
-                float d0 = MathUtils.Length(bez, new Bounds1(0f, t));
-                if (d0 < RRWConst.kBlockerNodeClear || laneLen - d0 < RRWConst.kBlockerNodeClear) continue;
-                float3 lp = MathUtils.Position(bez, t);
-                float3 right = arc.Right(arc.Project(lp));
-                if (!ClearPosition(lp, right, ld.HalfWidth, out float3 pos)) { tooClose++; continue; }
-                float3 tan = MathUtils.Tangent(bez, t);
-                tan.y = 0f;
-                var rot = quaternion.LookRotationSafe(math.normalizesafe(tan, new float3(0f, 0f, 1f)), math.up());
-                ld.Markers.Add(LaneClosureMarkers.Create(em, prefab, pos, rot, et.Edge, ld.Lane, rec.ProjectId));
-                ld.Stations.Add(s_Stations[k]);
-                made++;
+                int r = MarkerAt(em, prefab, et, rec, ld, arc, bez, s_Stations[k]);
+                if (r < 0) tooClose++;
+                else made += r;
             }
+            ld.ZoneS0 = et.PaintS0;
+            ld.ZoneS1 = et.PaintS1;
+            ld.Moving = false;
             if (made == 0)
             {
                 Fail(em, et, rec, ld, upd, s_Stations.Count == 0
@@ -832,6 +967,107 @@ namespace RealisticRoadWorks.V3.Traffic
             ld.Why = "";
             RRWLog.Verbose("traffic p" + rec.ProjectId + " e" + rec.Edge.Index + " lane drop: " + made + " marker(s) on lane " + RRWLog.E(ld.Lane) +
                            " lateral " + RRWLog.F(ld.Centre) + (tooClose > 0 ? " (" + tooClose + " position(s) too close to an open lane skipped)" : ""));
+        }
+
+        // One marker on the lane at arc distance s (EDGE frame): 1 made, 0 the lane does not run there (or too near its ends), -1 no
+        // position keeps clear of the open lanes.
+        private static int MarkerAt(EntityManager em, Entity prefab, EdgeUpgradeTraffic et, EdgeRecord rec, LaneDrop ld, EdgeArc arc, Bezier4x3 bez, float s)
+        {
+            float laneLen = MathUtils.Length(bez);
+            float3 ap = arc.Position(s);
+            MathUtils.Distance(bez, ap, out float t);
+            if (t <= 0.001f || t >= 0.999f) return 0;
+            float d0 = MathUtils.Length(bez, new Bounds1(0f, t));
+            if (d0 < RRWConst.kBlockerNodeClear || laneLen - d0 < RRWConst.kBlockerNodeClear) return 0;
+            float3 lp = MathUtils.Position(bez, t);
+            float3 right = arc.Right(arc.Project(lp));
+            if (!ClearPosition(lp, right, ld.HalfWidth, out float3 pos)) return -1;
+            float3 tan = MathUtils.Tangent(bez, t);
+            tan.y = 0f;
+            var rot = quaternion.LookRotationSafe(math.normalizesafe(tan, new float3(0f, 0f, 1f)), math.up());
+            ld.Markers.Add(LaneClosureMarkers.Create(em, prefab, pos, rot, et.Edge, ld.Lane, rec.ProjectId));
+            ld.Stations.Add(s);
+            return 1;
+        }
+
+        // Paint: marker stations over the painter's stretch of this edge, kUwPaintStep apart, anchored at multiples of it along the
+        // edge (a moved stretch keeps the stations it shares with the old one).
+        private static void PaintStations(EdgeUpgradeTraffic et, List<float> output)
+        {
+            output.Clear();
+            if (float.IsNaN(et.PaintS0) || !(et.PaintS1 > et.PaintS0)) return;
+            float step = RRWConst.kUwPaintStep;
+            output.Add(et.PaintS0);
+            for (float s = math.ceil(et.PaintS0 / step) * step; s < et.PaintS1 - 1f; s += step) if (s > et.PaintS0 + 1f) output.Add(s);
+            output.Add(et.PaintS1);
+        }
+
+        // Paint, every update of an active lane: when the painter's stretch moved on by kUwPaintStep (or more), the markers of the new
+        // stretch go down first (the lane stays blocked meanwhile); one update later, once they registered on this lane only, the
+        // ones outside the new stretch are removed and the lanes refreshed. The blocked range (machines' limits) follows.
+        private static void PaintMove(EntityManager em, World world, EdgeUpgradeTraffic et, EdgeRecord rec, LaneDrop ld, EdgeArc arc, uint upd)
+        {
+            if (!et.Paint || float.IsNaN(et.PaintS0)) return;
+            if (ld.Moving)
+            {
+                if (ld.MoveUpdate == upd) return;
+                int bad = 0;
+                for (int k = ld.Markers.Count - 1; k >= 0; k--)
+                {
+                    var m = ld.Markers[k];
+                    if (!LaneClosureMarkers.Alive(em, m)) { RemoveMarkerAt(ld, k); continue; }
+                    float sk = k < ld.Stations.Count ? ld.Stations[k] : float.NaN;
+                    bool outside = !float.IsNaN(sk) && (sk < ld.ZoneS0 - 0.5f || sk > ld.ZoneS1 + 0.5f);
+                    s_Tmp.Clear();
+                    LaneClosureMarkers.RegisteredLanes(em, m, s_Tmp);
+                    bool wrong = false;
+                    for (int j = 0; j < s_Tmp.Count; j++)
+                    {
+                        if (!ld.Registered.Contains(s_Tmp[j])) ld.Registered.Add(s_Tmp[j]);
+                        if (s_Tmp[j] != ld.Lane && !IsDropLane(et, s_Tmp[j])) wrong = true;
+                    }
+                    if (!outside && !wrong) continue;
+                    LaneClosureMarkers.RegisteredLanes(em, m, ld.Registered);
+                    LaneClosureMarkers.Delete(em, m);
+                    RemoveMarkerAt(ld, k);
+                    if (wrong) bad++;
+                    TrafficState.MarkersRemoved++;
+                }
+                if (!ld.Registered.Contains(ld.Lane)) ld.Registered.Add(ld.Lane);
+                ScheduleRefresh(ld.Registered, et.Edge, upd);
+                ld.Moving = false;
+                if (bad > 0)
+                {
+                    TrafficState.MarkersMisregistered += bad;
+                    RRWLog.Warn("traffic p" + rec.ProjectId + " e" + rec.Edge.Index + " painter closure at lateral " + RRWLog.F(ld.Centre) + ": " + bad +
+                                " marker(s) also registered on a lane that stays open: removed");
+                }
+                if (ld.Markers.Count == 0) { ld.Stage = DropStage.Pending; ld.StageUpdate = upd; }
+                return;
+            }
+            bool moved = float.IsNaN(ld.ZoneS0) || math.abs(et.PaintS0 - ld.ZoneS0) >= RRWConst.kUwPaintStep || math.abs(et.PaintS1 - ld.ZoneS1) >= RRWConst.kUwPaintStep;
+            if (!moved || !TrafficUtil.Alive(em, ld.Lane) || !em.HasComponent<Curve>(ld.Lane)) return;
+            var prefab = LaneClosurePrefab.Ensure(world, em, out _, out _);
+            if (prefab == Entity.Null) return;
+            CollectOthers(em, et, arc);
+            var bez = em.GetComponentData<Curve>(ld.Lane).m_Bezier;
+            PaintStations(et, s_Stations);
+            int made = 0;
+            for (int k = 0; k < s_Stations.Count; k++)
+            {
+                float s = s_Stations[k];
+                bool have = false;
+                for (int j = 0; j < ld.Stations.Count && !have; j++) have = math.abs(ld.Stations[j] - s) < 2f;
+                if (have) continue;
+                if (MarkerAt(em, prefab, et, rec, ld, arc, bez, s) > 0) made++;
+            }
+            TrafficState.MarkersPlaced += made;
+            ld.ZoneS0 = et.PaintS0;
+            ld.ZoneS1 = et.PaintS1;
+            ld.Moving = true;
+            ld.MoveUpdate = upd;
+            RRWLog.Verbose("traffic p" + rec.ProjectId + " e" + rec.Edge.Index + " painter closure at lateral " + RRWLog.F(ld.Centre) + " moves to [" +
+                           RRWLog.F(et.PaintS0) + ", " + RRWLog.F(et.PaintS1) + "] m: " + made + " marker(s) ahead");
         }
 
         // The update after placing: every marker must be registered on its lane, and on no lane that stays open (that would close the

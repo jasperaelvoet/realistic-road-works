@@ -708,6 +708,8 @@ namespace RealisticRoadWorks.V3
                 case SurfaceLayer.FreshAsphalt:
                 case SurfaceLayer.FreshAsphaltCover:
                 {
+                    // upgrade works only paint: no resurfacing (OldAsphaltCover below hides the markings ahead of the painter)
+                    if (v.IsUpgrade) return Span.Empty;
                     float F = QuantizeFront(MainFront(v), U);
                     if (v.SwapActive)
                     {
@@ -719,9 +721,16 @@ namespace RealisticRoadWorks.V3
                 }
                 case SurfaceLayer.OldAsphaltCover:
                 {
-                    if (!v.IsUpgrade || firstWorks) return Span.Empty;
-                    if (v.SwapActive) return StageIndexOf(v) == 0 ? new Span(0f, U) : Span.Empty;
-                    return new Span(TapeFront(v), U);
+                    // upgrade works: the road without markings ahead of the painter on the half painted now; the other half carries
+                    // traffic on the yellow lines until its turn
+                    if (!v.IsUpgrade) return Span.Empty;
+                    float F = QuantizeFront(MainFront(v), U);
+                    if (v.SwapActive)
+                    {
+                        if (StageIndexOf(v) == 0) return firstWorks ? new Span(F, U) : new Span(0f, U);
+                        return firstWorks ? Span.Empty : new Span(F, U);
+                    }
+                    return firstWorks ? new Span(F, U) : new Span(TapeFront(v), U);
                 }
                 case SurfaceLayer.TempMarking:
                     return (half & RRWConst.kStagedOpenHalf) != 0 ? SurfaceSpanSingle(SurfaceLayer.TempMarking, v) : Span.Empty;

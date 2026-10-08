@@ -235,6 +235,7 @@ namespace RealisticRoadWorks.V3.UI
             var t = u.AppliedTraffic;
             if (UpgradeShuttle.GreenAt.ContainsKey(st.ProjectId)) return RRWText.Get(RRWText.UpgradeTrafficShuttle);
             if (t == BandTraffic.Drop) return RRWText.Format(RRWText.UpgradeTrafficLaneDrop, kmh);
+            if (t == BandTraffic.Paint) return RRWText.Format(RRWText.UpgradeTrafficPaint, kmh);
             if (t == BandTraffic.Half && HalfTwoWay(st.ProjectId, u.AppliedWindow)) return RRWText.Get(RRWText.UpgradeTrafficHalfTwoWay);
             if (IsSlowZonePrimitive(t))
                 return u.Reason != StageBlockReason.None

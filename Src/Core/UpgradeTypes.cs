@@ -79,6 +79,8 @@ namespace RealisticRoadWorks.V3
         Half = 3,        // one direction group closed, one-way operation with a detour
         Carriageway = 4, // the whole carriageway closed, sidewalks open
         Dressing = 5,    // slow zone and devices only: no lane closed, no machine in a lane
+        Paint = 6,       // re-marking on the move: the lanes next to the lines painted now close only around the painter (rolling
+                         // blockers), every direction keeps a lane
         Undecided = 7,   // window not started yet
     }
 
@@ -718,7 +720,8 @@ namespace RealisticRoadWorks.V3
         public RoadZones PreClosed;  // groups of later windows closed already (AllAtOnce; Director)
         public RoadZones MachineSafe;// zones (verge bits included) where machines may stand now (Director: PhasePlan.UpgradeSafeZones)
         public bool AllAtOnce;       // saved flag, cleared at runtime when lane drops are no longer available (never set later)
-        public bool PreCover;        // saved flag: bands are covered from the apply frame (PhasePlan.UpgradeSpans)
+        public bool PreCover;        // saved flag: bands are covered from the apply frame (PhasePlan.UpgradeSpans); off while Deferred
+        public bool Deferred;        // the old road is live until the works' finishing (RRWDeferredNet): no cover fakes it
         public uint Prims;           // 4 bits per window: effective primitive of started windows, expected primitive of later ones
         public ulong ZonesA, ZonesB; // 16 bits per window (windows 0-3, 4-7): lane groups each window closes (ZonesOf)
         // The layout APPLIED now (read it through AppliedWindow / AppliedTraffic / AppliedZones below; SetApplied writes it).

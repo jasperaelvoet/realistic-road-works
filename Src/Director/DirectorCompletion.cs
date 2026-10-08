@@ -71,6 +71,7 @@ namespace RealisticRoadWorks.V3.Director
         private void TryFinish(ProjectRecord proj, DirProjectState ps)
         {
             var em = EntityManager;
+            if (proj.Kind == WorksKind.Construction && AwaitDeferredSwitch(proj)) return;   // the upgraded road goes in first
             // the Ground wait (and its timeout) counts from when the road could be handed back (gate cleared), not from frame N
             uint since = ps.OpenedAfterRelease && ps.OpenedAt > ps.CompletingSince ? ps.OpenedAt : ps.CompletingSince;
             uint waited = m_Now - since;

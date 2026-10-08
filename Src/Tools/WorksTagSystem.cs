@@ -190,6 +190,7 @@ namespace RealisticRoadWorks.V3.Tooling
                 int created = Create(m_New, SiteFlags.None, settings);
                 int replaced = Create(m_Replaced, SiteFlags.Replaced, settings);
                 m_Upgrades.Flush(EntityManager, settings, m_Sites);
+                if (RRWGates.UpgradeDefer && m_Upgrades.DeferTargets.Count > 0) SnapshotForDefer(entities, temps);
 
                 if (created + replaced + m_Split + m_Combined + m_CombinedNew + m_ReplaceInherit + m_UpgradePaid > 0 || m_SkippedOutside > 0
                     || m_PreviewHiddenTemps > 0 || m_Upgrades.Any || m_DemolitionCredit + m_CombineEndedH > 0)
@@ -212,6 +213,77 @@ namespace RealisticRoadWorks.V3.Tooling
                 entities.Dispose();
                 temps.Dispose();
             }
+        }
+
+        // Deferred upgrades: the old state of every road piece and node this apply modifies, with the state the tool gives them,
+        // for DeferredNetSystem to put the old road back at the next Modification1 (the works keep it until their finishing).
+        // Only a plain modification is deferred: no temp of the apply creates, deletes, replaces or combines anything.
+        private void SnapshotForDefer(NativeArray<Entity> entities, NativeArray<Temp> temps)
+        {
+            var em = EntityManager;
+            const TempFlags kStructural = TempFlags.Create | TempFlags.Delete | TempFlags.Replace | TempFlags.Combine;
+            for (int i = 0; i < temps.Length; i++)
+                if ((temps[i].m_Flags & kStructural) != 0 || temps[i].m_Original == Entity.Null) { RRWLog.Verbose("tools: upgrade not deferred (the apply changes the network structure)"); return; }
+            var nodes = m_TempNodes.IsEmptyIgnoreFilter ? default : m_TempNodes.ToEntityArray(Allocator.Temp);
+            var nt = m_TempNodes.IsEmptyIgnoreFilter ? default : m_TempNodes.ToComponentDataArray<Temp>(Allocator.Temp);
+            try
+            {
+                if (nodes.IsCreated)
+                    for (int i = 0; i < nt.Length; i++)
+                        if ((nt[i].m_Flags & kStructural) != 0 || nt[i].m_Original == Entity.Null) { RRWLog.Verbose("tools: upgrade not deferred (a node is created / replaced)"); return; }
+                int start = DeferredNet.PendingRevert.Count;
+                Entity anySite = Entity.Null;
+                foreach (var kv in m_Upgrades.DeferTargets) { anySite = kv.Key; break; }
+                for (int i = 0; i < entities.Length; i++)
+                {
+                    var temp = entities[i];
+                    var orig = temps[i].m_Original;
+                    if (!em.Exists(orig) || !em.HasComponent<Curve>(orig) || !em.HasComponent<Curve>(temp)) continue;
+                    var snap = Snap(em, orig, temp, DeferredKind.Edge);
+                    snap.OldCurve = em.GetComponentData<Curve>(orig).m_Bezier;
+                    snap.Target.m_Curve = em.GetComponentData<Curve>(temp).m_Bezier;
+                    if (m_Upgrades.DeferTargets.TryGetValue(orig, out var layout)) snap.Target.SetLayout(layout);
+                    snap.SiteEdge = m_Upgrades.DeferTargets.ContainsKey(orig) ? orig : anySite;
+                    DeferredNet.PendingRevert.Add(snap);
+                }
+                if (nodes.IsCreated)
+                    for (int i = 0; i < nodes.Length; i++)
+                    {
+                        var temp = nodes[i];
+                        var orig = nt[i].m_Original;
+                        if (!em.Exists(orig) || !em.HasComponent<Node>(orig) || !em.HasComponent<Node>(temp)) continue;
+                        var snap = Snap(em, orig, temp, DeferredKind.Node);
+                        var on = em.GetComponentData<Node>(orig);
+                        var tn = em.GetComponentData<Node>(temp);
+                        snap.OldPosition = on.m_Position; snap.OldRotation = on.m_Rotation;
+                        snap.Target.m_Position = tn.m_Position; snap.Target.m_Rotation = tn.m_Rotation;
+                        snap.SiteEdge = anySite;
+                        DeferredNet.PendingRevert.Add(snap);
+                    }
+                RRWLog.Info("tools: upgrade deferred: " + (DeferredNet.PendingRevert.Count - start) + " road piece(s) / node(s) keep their old state until the works' finishing");
+            }
+            finally
+            {
+                if (nodes.IsCreated) nodes.Dispose();
+                if (nt.IsCreated) nt.Dispose();
+            }
+        }
+
+        private static DeferredNet.Snapshot Snap(EntityManager em, Entity orig, Entity temp, DeferredKind kind)
+        {
+            var s = new DeferredNet.Snapshot { Entity = orig, Kind = kind };
+            s.OldPrefab = em.HasComponent<PrefabRef>(orig) ? em.GetComponentData<PrefabRef>(orig).m_Prefab : Entity.Null;
+            s.OldHasUpgraded = em.HasComponent<Upgraded>(orig);
+            if (s.OldHasUpgraded) s.OldUpgraded = em.GetComponentData<Upgraded>(orig).m_Flags;
+            s.OldHasElevation = em.HasComponent<Game.Net.Elevation>(orig);
+            if (s.OldHasElevation) s.OldElevation = em.GetComponentData<Game.Net.Elevation>(orig).m_Elevation;
+            s.Target.m_Kind = (byte)kind;
+            s.Target.m_Prefab = em.HasComponent<PrefabRef>(temp) ? em.GetComponentData<PrefabRef>(temp).m_Prefab : s.OldPrefab;
+            s.Target.m_HasUpgraded = em.HasComponent<Upgraded>(temp);
+            if (s.Target.m_HasUpgraded) s.Target.m_Upgraded = em.GetComponentData<Upgraded>(temp).m_Flags;
+            s.Target.m_HasElevation = em.HasComponent<Game.Net.Elevation>(temp);
+            if (s.Target.m_HasElevation) s.Target.m_Elevation = em.GetComponentData<Game.Net.Elevation>(temp).m_Elevation;
+            return s;
         }
 
         // Originals touched by this apply (split / combine sources): every temp edge's m_Original that is a live road edge,

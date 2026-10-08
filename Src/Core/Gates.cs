@@ -60,7 +60,8 @@ namespace RealisticRoadWorks.V3
         public static bool UpgradePreCover = RRWConst.kUwPreCoverOn;       // bands covered from the apply frame
         public static bool UpgradeNewParkingOff = RRWConst.kUwNewParkingOffOn; // empty new parking lanes of build bands disabled until opened
         public static bool UpgradeFootprintHold = RRWConst.kUwFootprintHoldOn; // old footprint held flat after a narrowing (Ground)
-        public static bool UpgradeOldAsphalt = RRWConst.kUwOldAsphaltOn;   // removed strip shows "RRW Old Asphalt" until it is broken up
+        public static bool UpgradeOldAsphalt = RRWConst.kUwOldAsphaltOn;
+        public static bool UpgradeDefer = RRWConst.kUwDeferOn;   // upgrade works keep the old road (and junctions) until their finishing   // removed strip shows "RRW Old Asphalt" until it is broken up
 
         public static void Changed() => Revision++;
 

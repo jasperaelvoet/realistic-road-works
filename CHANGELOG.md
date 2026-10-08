@@ -3,17 +3,30 @@
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [3.2.1] - 2026-10-08
+## [3.3.0] - 2026-10-08
+
+### Added
+
+- **The old road stays until the works are done.** During a road upgrade the old road, its junctions and its connections stay
+  exactly as they were while the new strips are built beside them. The upgraded road and its junctions appear only when the
+  works reach their finishing (the re-marking, or the completion). Saved games keep the pending upgrade.
+- **Re-marking on the move.** Every upgrade that changes the carriageway ends with re-marking. On roads with two lanes or more
+  per direction the painting crew works on the move: only the lanes next to the lines being painted close, over a short stretch
+  around the crew that moves along with it, and every direction keeps driving. Narrower roads repaint one half at a time on
+  temporary lanes (or with portable traffic lights), and close fully only as a last resort.
+- Ahead of the painting crew the road carries no markings; behind it the new markings appear. New strips keep their fresh
+  asphalt look until the crew has passed. There is no more black resurfacing of the whole road during re-marking.
 
 ### Fixed
 
-- Road upgrades no longer look finished before the works reach a strip: the old road that still carries traffic keeps a worn
-  old-asphalt look (with the yellow temporary lines), a strip that is not dug yet shows the ground it was (grass), and only
-  freshly paved asphalt is black until the final markings are painted.
-- The yellow temporary lines stop where the temporary lanes ease back to the road's own lanes before a junction, so they no
-  longer end in a jog at the junction.
+- The digging and fences of a widened side start right at the old kerb instead of leaving a strip of grass between the road and
+  the works, and the barriers stand along the lane in use.
+- A kerb that only moves by a metre (a slightly wider or narrower sidewalk) no longer gets fenced-off works of its own.
+- The ground textures of the works no longer appear to slide when a layer grows, shrinks or changes.
+- The yellow temporary lines follow the temporary lanes back to the road's own markings at the ends of a road piece and run on
+  over a straight node to join the markings of the next piece; in bends and at width changes they end at the junction.
 
-[3.2.1]: https://github.com/jasperaelvoet/realistic-road-works/releases/tag/v3.2.1
+[3.3.0]: https://github.com/jasperaelvoet/realistic-road-works/releases/tag/v3.3.0
 
 ## [3.2.0] - 2026-10-07
 

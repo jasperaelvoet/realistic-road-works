@@ -22,6 +22,9 @@ namespace RealisticRoadWorks.V3.Surfaces
         // A C4 half band has no margin on its inner (split) side: only the outer side is tapered at visible junctions,
         // so the two halves never open a gap over the centre line there
         public bool NoMarginLeft, NoMarginRight;
+        // Lateral offset easing in toward each end (temporary lines that follow TrafficLaneShift's taper): Shift at the edge end
+        // within ShiftFrom metres of it, none beyond ShiftTo (smoothstep between). 0 = none.
+        public float Shift, ShiftFrom, ShiftTo;
     }
 
     internal static class SurfaceGeom
@@ -181,6 +184,13 @@ namespace RealisticRoadWorks.V3.Surfaces
             float cut = lat.Margin * (1f - TaperK(lat, s, L));
             left = lat.Left + (lat.NoMarginLeft ? 0f : cut);
             right = lat.Right - (lat.NoMarginRight ? 0f : cut);
+            if (lat.Shift != 0f && lat.ShiftTo > lat.ShiftFrom)
+            {
+                float w = math.smoothstep(lat.ShiftFrom, lat.ShiftTo, s) * math.smoothstep(lat.ShiftFrom, lat.ShiftTo, L - s);
+                float off = lat.Shift * (1f - w);
+                left += off;
+                right += off;
+            }
         }
 
         // Point at arc distance s and lateral offset (port of EdgeArc.Point: inner-curve clamp to 0.85 R, optional mitre).
@@ -217,7 +227,7 @@ namespace RealisticRoadWorks.V3.Surfaces
             output.Clear();
             if (arc == null || s1 - s0 < kMinGeomLength) return;
             float L = arc.Length;
-            float maxLat = math.max(math.abs(lat.Left), math.abs(lat.Right));
+            float maxLat = math.max(math.abs(lat.Left), math.abs(lat.Right)) + math.abs(lat.Shift);
             var ss = s_Stations;
             ss.Clear();
             ss.Add(s0);
@@ -241,7 +251,17 @@ namespace RealisticRoadWorks.V3.Surfaces
                 AddStation(ss, L - lat.TaperS1 - kTaperFlat, s0, s1);
                 AddStation(ss, L - lat.TaperS1 - kTaperFlat - kTaperRamp, s0, s1);
             }
-            if (lat.TaperStart || lat.TaperEnd)
+            bool shifted = lat.Shift != 0f && lat.ShiftTo > lat.ShiftFrom;
+            if (shifted)
+            {
+                // the eased offset is drawn smooth: a station every metre over both ease zones
+                for (float x = lat.ShiftFrom; x <= lat.ShiftTo; x += 1f)
+                {
+                    AddStation(ss, x, s0, s1);
+                    AddStation(ss, L - x, s0, s1);
+                }
+            }
+            if (lat.TaperStart || lat.TaperEnd || shifted)
             {
                 ss.Sort();
                 // drop stations closer than the minimum gap (keep both ends)

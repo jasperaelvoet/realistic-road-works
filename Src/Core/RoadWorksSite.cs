@@ -161,8 +161,6 @@ namespace RealisticRoadWorks.V3
                 var b = Band(i);
                 if (b.Lo16 >= b.Hi16 || b.Window >= m_WindowCount) return false;
                 if (b.Lo16 < -kMaxLateral16 || b.Hi16 > kMaxLateral16) return false;
-                var t = b.Traffic;
-                if (t == (BandTraffic)6) return false;
             }
             return true;
         }

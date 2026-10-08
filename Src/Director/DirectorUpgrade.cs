@@ -362,6 +362,7 @@ namespace RealisticRoadWorks.V3.Director
                 if (eu == null) continue;
                 var st = rec.GetOrCreate<DirEdgeState>(ModuleSlot.Director);
                 eu.SyncChainIndex(rt);
+                SyncDeferredEdge(rec, st, eu);
                 ReadUpgradeLayout(rec, st, eu);
                 eu.RefreshSubStrips(rec.Section, rec.GeometryRevision, lht);
                 RefreshKeepOuts(rec, st, eu, site);
@@ -393,6 +394,7 @@ namespace RealisticRoadWorks.V3.Director
             bool swapLatched = remarkW >= 0 && ((proj.Switch != StageSwitch.None && ps.UwSwitchIsSwap && ps.UwSwitchWindow == remarkW) || ps.UwSwapDone == remarkW);
             bool swapAllowed = remarkW >= 0 && RRWGates.C4Swap && UpgradeHalfBlock(proj, RoadZones.Carriageway, true, chainBlock) == StageBlockReason.None;
             ps.UwSwapOn = swapLatched || (swapAllowed && !ps.SwitchSkipped);
+            SyncDeferredProject(proj, ps, lw, remarkW);
 
             int stampW = -1;
             var stampPrim = BandTraffic.Undecided;
@@ -408,6 +410,7 @@ namespace RealisticRoadWorks.V3.Director
                 var closed = rt.HalfClosesOf(w, input.RemarkWindow && ps.UwSwapOn);
                 input.EveryDirectionKeepsLane = KeepsLaneEveryEdge(proj, w);
                 input.RemarkTwoWay = input.RemarkWindow && RemarkTwoWayEveryEdge(proj, w, rt.AllAtOnce);
+                input.PaintOK = input.RemarkWindow && PaintEveryEdge(proj);
                 if (shuttleSignals && !buildings)
                 {
                     if (input.RemarkWindow) input.RemarkShuttleOK = !input.RemarkTwoWay && RemarkShuttleEveryEdge(proj, w, rt.AllAtOnce);
@@ -518,6 +521,20 @@ namespace RealisticRoadWorks.V3.Director
             {
                 if (!SiteRegistry.TryGetEdge(proj.Edges[i], out var rec) || rec.Upgrade == null) continue;
                 if (!rec.Upgrade.RemarkShuttle(w, aao)) return false;
+                n++;
+            }
+            return n > 0;
+        }
+
+        // Paint (re-marking on the move): on every upgrade edge every travel direction of the new road has two drive lanes or more,
+        // so one closes around the painter while another keeps driving.
+        private static bool PaintEveryEdge(ProjectRecord proj)
+        {
+            int n = 0;
+            for (int i = 0; i < proj.Edges.Count; i++)
+            {
+                if (!SiteRegistry.TryGetEdge(proj.Edges[i], out var rec) || rec.Upgrade == null) continue;
+                if (!rec.Upgrade.PaintLanes()) return false;
                 n++;
             }
             return n > 0;
@@ -661,7 +678,9 @@ namespace RealisticRoadWorks.V3.Director
             st.UwLayoutTried = rec.GeometryRevision;
             m_UwRead.Clear();
             bool ok = false;
-            try { ok = UpgradeLayoutReader.Read(EntityManager, rec.Edge, rec.Arc, m_UwRead); }
+            // deferred: the new road is not live yet: its layout as the classifier read it at the apply
+            if (eu.Deferred && DeferredLayout(rec, m_UwRead.L)) ok = true;
+            else try { ok = UpgradeLayoutReader.Read(EntityManager, rec.Edge, rec.Arc, m_UwRead); }
             catch (Exception e) { RRWLog.ErrorOnce("director upgrade layout", e); }
             if (!ok)
             {
@@ -730,7 +749,7 @@ namespace RealisticRoadWorks.V3.Director
             bool fresh = rt.DerivedFresh && !undecided;
             // dropped lanes count only in a window that runs (or, while machines vacate, ran) as lane drops
             bool dropOk = u.Valid && !u.InSetup && !u.InTeardown
-                          && (rt.Primitive[lw] == BandTraffic.Drop || u.AppliedTraffic == BandTraffic.Drop);
+                          && (PhasePlan.LaneDrops(rt.Primitive[lw]) || PhasePlan.LaneDrops(u.AppliedTraffic));
             for (int i = 0; i < proj.Edges.Count && fresh; i++)
             {
                 Entity e = proj.Edges[i];

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using Game.Common;
 using Unity.Entities;
 using Unity.Mathematics;
+using ConnectedEdge = Game.Net.ConnectedEdge;
+using Edge = Game.Net.Edge;
 
 // SurfaceAreaSystem, third part: the yellow temporary lines, the C4 per-half log
 // lines and the runtime restyle of the line clones.
@@ -130,7 +132,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         // the NA theme), dashed lines between lanes of one direction, and a solid edge line next to a dropped lane. Lanes under
         // a closed group (carriageway or one direction closed) carry no traffic and get none.
 
-        private struct UwLine { public float C; public bool Dashed; }
+        private struct UwLine { public float C; public bool Dashed; public float Shift; }   // Shift: offset at the edge ends (plan lines)
         private struct UwLane { public float Lo, Hi; public sbyte Dir; public bool Open; }
         private readonly List<UwLine> m_UwLines = new List<UwLine>(8);
         private readonly List<UwLane> m_UwLanes = new List<UwLane>(8);
@@ -182,16 +184,22 @@ namespace RealisticRoadWorks.V3.Surfaces
                 if (!PhasePlan.ToEdgeLocal(span, c.Site.m_ChainU0, c.Site.m_ChainU1, c.L, out ls0, out ls1)) why = "no span on this edge";
                 else if (m_LinesFromPlan)
                 {
-                    // temporary lanes ease back to the road's own lanes near each edge end (TrafficLaneShift): the lines stop there
-                    float taper = math.min(RRWConst.kUwLaneTaperTo, c.L * 0.5f - 1f);
-                    ls0 = math.max(ls0, taper);
-                    ls1 = math.min(ls1, c.L - taper);
-                    if (ls1 - ls0 < 2f) why = "edge too short for temporary lines";
+                    // temporary lanes ease back to the road's own lanes near each edge end (TrafficLaneShift): the lines follow them
+                    // to the edge ends, where they meet the road's own markings
+                    ls0 = 0f;
+                    ls1 = c.L;
                 }
             }
             if (why == null && !SurfaceGeom.GeometricRange(SurfaceLayer.TempMarking, ls0, ls1, c.L, es.Ends, out gs0, out gs1, out cutS, out cutE,
                                                           out rs, out re, out _, out _))
                 why = "nothing left outside the junctions";
+            if (why == null && m_LinesFromPlan)
+            {
+                // a node that only continues the road: the lines run on over it to its centre and join the markings of the next piece
+                var ed = m_Em.GetComponentData<Edge>(c.Edge);
+                if (es.Ends.Start == EndKind.Visible && Continuation(c.Edge, ed.m_Start)) { gs0 = 0f; cutS = float3.zero; }
+                if (es.Ends.End == EndKind.Visible && Continuation(c.Edge, ed.m_End)) { gs1 = c.L; cutE = float3.zero; }
+            }
             if (why != null)
             {
                 es.TempReason = why;
@@ -224,8 +232,11 @@ namespace RealisticRoadWorks.V3.Surfaces
                 if (row.Dashed != line.Dashed) row.Sig = 0u;
                 row.Line = i;
                 row.Dashed = line.Dashed;
-                uint sig = math.hash(new float4(left, right, c.Rec.GeometryRevision, 1f)) ^ (c.Es.Ends.Hash * 2654435761u) ^ (row.Dashed ? 0x9E3779B9u : 0u);
+                uint sig = math.hash(new float4(left, right, c.Rec.GeometryRevision, line.Shift)) ^ (c.Es.Ends.Hash * 2654435761u) ^ (row.Dashed ? 0x9E3779B9u : 0u)
+                           ^ math.hash(new float2(gs0, gs1)) * 7u;
                 DesiredPieces(c, row.Dashed, ls0, ls1, gs0, gs1);
+                m_RowShift = line.Shift;
+                m_RowShiftTo = math.min(RRWConst.kUwLaneTaperTo, math.max(RRWConst.kUwLaneTaperFrom + 1f, c.L * 0.5f - 1f));
                 DiffRow(c, row, i, left, right, sig, prefab, appear, rebuild, bypass, tickOpen, cutS, cutE, rs, re, ref wrote, ref deferred);
                 pieces += row.Pieces.Count;
             }
@@ -243,7 +254,8 @@ namespace RealisticRoadWorks.V3.Surfaces
             m_LinesFromPlan = false;
             m_UwLines.Clear();
             m_UwLanes.Clear();
-            var cs = c.Ue.CrossSection;
+            // deferred: the old road is live, its lanes are the ones in use
+            var cs = c.Ue.TrafficCs;
             var u = c.View.Upgrade;
             int geo = c.Rec.GeometryRevision;
             // temporary lanes of the applied window: the lines follow them (lanes moved over the old asphalt)
@@ -263,6 +275,7 @@ namespace RealisticRoadWorks.V3.Surfaces
                 if (!dropped) open++;
             }
             if (open == 0) return "no lane open";
+            if (c.Ue.Deferred && open == m_UwLanes.Count) return "the old road's own markings are in use";
             m_UwLanes.Sort((a, b) => a.Lo.CompareTo(b.Lo));
             float hw = math.max(0.02f, RRWGates.TempLineWidth) * 0.5f;
             float inset = RRWConst.kTempLineEdgeInset + hw;
@@ -294,6 +307,22 @@ namespace RealisticRoadWorks.V3.Surfaces
         // opposing slots, dashed lines between slots of one direction.
         private bool m_LinesFromPlan;   // the current line set follows a temporary lane plan (lines stop before the edge-end tapers)
 
+        private float m_RowShift, m_RowShiftTo;   // the row being written (BuildLine)
+
+        // The node only continues the road straight on into a piece of the same width (the markings run on unchanged): two road
+        // pieces, tangents within ~8 degrees, composition widths within 0.5 m. A bend or a width change keeps its own node markings.
+        private bool Continuation(Entity edge, Entity node)
+        {
+            if (node == Entity.Null || !m_Em.HasBuffer<ConnectedEdge>(node)) return false;
+            var ce = m_Em.GetBuffer<ConnectedEdge>(node, true);
+            if (ce.Length != 2) return false;
+            Entity other = ce[0].m_Edge == edge ? ce[1].m_Edge : ce[0].m_Edge;
+            if (other == edge || !m_Em.HasComponent<Game.Net.Curve>(other) || !m_Em.HasComponent<Edge>(other)) return false;
+            float3 a = SurfaceGeom.OutwardTangent(m_Em, edge, node), b = SurfaceGeom.OutwardTangent(m_Em, other, node);
+            if (math.dot(a, -b) < 0.99f) return false;
+            return math.abs(EcsUtil.CompositionWidth(m_Em, edge) - EcsUtil.CompositionWidth(m_Em, other)) < 0.5f;
+        }
+
         private string PlanLineSet(TempLanePlan plan)
         {
             m_LinesFromPlan = true;
@@ -306,19 +335,20 @@ namespace RealisticRoadWorks.V3.Surfaces
             {
                 float x = s_PlanLines[k].x;
                 int kind = (int)s_PlanLines[k].y;
+                float sh = -UpgradeTempLanes.ShiftAt(plan, x);
                 if (kind == 0)
                 {
                     // edge line: inside the slot run (first line of a run is its left edge)
                     bool left = IsRunStart(k);
-                    m_UwLines.Add(new UwLine { C = left ? x + inset : x - inset });
+                    m_UwLines.Add(new UwLine { C = left ? x + inset : x - inset, Shift = sh });
                 }
-                else if (kind == 2) m_UwLines.Add(new UwLine { C = x, Dashed = true });
+                else if (kind == 2) m_UwLines.Add(new UwLine { C = x, Dashed = true, Shift = sh });
                 else if (RRWCity.NaTheme)
                 {
-                    m_UwLines.Add(new UwLine { C = x - RRWConst.kTempLineDividerOffset * 0.5f - hw });
-                    m_UwLines.Add(new UwLine { C = x + RRWConst.kTempLineDividerOffset * 0.5f + hw });
+                    m_UwLines.Add(new UwLine { C = x - RRWConst.kTempLineDividerOffset * 0.5f - hw, Shift = sh });
+                    m_UwLines.Add(new UwLine { C = x + RRWConst.kTempLineDividerOffset * 0.5f + hw, Shift = sh });
                 }
-                else m_UwLines.Add(new UwLine { C = x });
+                else m_UwLines.Add(new UwLine { C = x, Shift = sh });
             }
             return m_UwLines.Count > 0 ? null : "no lane boundary to mark";
         }
@@ -341,8 +371,9 @@ namespace RealisticRoadWorks.V3.Surfaces
                 return;
             }
             // dashes in CHAIN u, anchored at the trimmed chain start; clipped to the line's chain span, this edge and the drawn range
-            var span = m_ProjSpan[(int)SurfaceLayer.TempMarking];
             float u0 = c.Site.m_ChainU0, u1 = c.Site.m_ChainU1;
+            // plan lines run to the edge ends (they follow the lanes back to the road's own markings)
+            var span = m_LinesFromPlan ? new Span(math.min(u0, u1) - 1f, math.max(u0, u1) + 1f) : m_ProjSpan[(int)SurfaceLayer.TempMarking];
             float lo = math.max(span.A, math.min(u0, u1)), hi = math.min(span.B, math.max(u0, u1));
             if (hi - lo < kMinPiece || math.abs(u1 - u0) < 1e-3f) return;
             float anchor = c.View.Trim0;
@@ -468,7 +499,11 @@ namespace RealisticRoadWorks.V3.Surfaces
         // visible road). No margin, no taper: EdgeSection.TempLine is the exact line.
         private bool BuildLine(EdgeCtx c, float left, float right, float s0, float s1, float3 cutS, float3 cutE, bool rs, bool re)
         {
-            var lat = new BandLat { Left = left, Right = right, Margin = 0f, MinWidth = SurfacePalette.kTempMarkingMinWidth };
+            var lat = new BandLat
+            {
+                Left = left, Right = right, Margin = 0f, MinWidth = SurfacePalette.kTempMarkingMinWidth,
+                Shift = m_RowShift, ShiftFrom = RRWConst.kUwLaneTaperFrom, ShiftTo = m_RowShiftTo,
+            };
             SurfaceGeom.Strip(c.Rec.Arc, s0, s1, lat, cutS, cutE, rs, re, m_Poly);
             return ApplyVertexY(c);
         }
