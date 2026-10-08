@@ -186,7 +186,7 @@ namespace RealisticRoadWorks.V3
         {
             // 2. chain-frame bands of every edge, union, windows
             var cfb = new List<UpgradeBand>(16);
-            bool anyBuildings = false, anyDependants = false, allKeep = true, anyBuild = false;
+            bool anyBuildings = false, anyDependants = false, allKeep = true, anyBuild = false, allGravel = true;
             float maxLat = 0f;
             foreach (var ce in run.Edges)
             {
@@ -196,6 +196,7 @@ namespace RealisticRoadWorks.V3
                 anyBuildings |= e.Buildings;
                 anyDependants |= e.Dependants;
                 allKeep &= e.KeepsLanes;
+                allGravel &= sp.Gravel;
                 for (int j = 0; j < sp.BandCount; j++)
                 {
                     var b = sp.Band(j);
@@ -208,9 +209,11 @@ namespace RealisticRoadWorks.V3
             var map = new int[cfb.Count];
             UpgradePlan.Union(cfb, chainBands, map);
             bool parallel = !anyBuildings && !anyDependants;
-            var sched = UpgradePlan.Windows(chainBands, parallel, rushed, rates.DemolitionRatio);
+            // a gravel road is dug and gravelled in one step (no re-marking: it has no markings)
+            var sched = UpgradePlan.Windows(chainBands, parallel, rushed, rates.DemolitionRatio, allGravel);
             bool allAtOnce = rates.DropGate && anyBuild && !anyBuildings && allKeep;
-            var upFlags = (allAtOnce ? UpgradeFlags.AllAtOnce : UpgradeFlags.None) | (rates.PreCoverGate ? UpgradeFlags.PreCover : UpgradeFlags.None);
+            var upFlags = (allAtOnce ? UpgradeFlags.AllAtOnce : UpgradeFlags.None) | (rates.PreCoverGate ? UpgradeFlags.PreCover : UpgradeFlags.None)
+                          | (allGravel ? UpgradeFlags.Gravel : UpgradeFlags.None);
             var asBands = new List<UpgradeBand>(chainBands.Count);
             for (int k = 0; k < chainBands.Count; k++) asBands.Add(UpgradeBand.Make(chainBands[k].Kind, chainBands[k].Side, chainBands[k].Lo, chainBands[k].Hi));
             var cls = UpgradePlan.ClassOf(asBands, asBands.Count);
@@ -218,7 +221,7 @@ namespace RealisticRoadWorks.V3
 
             // 3. hours
             float hours = WorkTime.UpgradeHours(run.Length, rc, rates.ConstructionHoursPerKm, rates.ConstructionMinHours, rates.DemolitionRatio,
-                                                chainBands, sched.N, newWidth, cls, true);
+                                                chainBands, sched.N, newWidth, cls, true, allGravel);
             uint required = WorkTime.FramesFromHours(hours);
             ushort seed = (ushort)(math.hash(new uint2(id, (uint)run.Edges.Count)) & 0xFFFF);
 

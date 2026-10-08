@@ -45,7 +45,7 @@ namespace RealisticRoadWorks.V3
         // windows (UpgradePlan.Windows). demolitionRatio = demolition hours per km / construction hours per km.
         public static float UpgradeHours(float chainLength, RoadClassInfo rc, float constructionHoursPerKm, float constructionMinHours,
                                          float demolitionRatio, IList<ChainBand> bands, int windows, float newWidth, UpgradeClass cls,
-                                         bool keepsTraffic)
+                                         bool keepsTraffic, bool gravel = false)
         {
             float full = math.max(constructionMinHours, chainLength / 1000f * constructionHoursPerKm * ClassMult(rc));
             float raw = chainLength / 1000f * constructionHoursPerKm * ClassMult(rc);
@@ -60,7 +60,7 @@ namespace RealisticRoadWorks.V3
                     {
                         if (bands[i].Window != w) continue;
                         bool follows = remark && bands[i].Kind != BandKind.Remark && UpgradePlan.RemarkFollows(bands, w);
-                        best = math.max(best, UpgradePlan.BandWeight(bands[i], follows, demolitionRatio));
+                        best = math.max(best, UpgradePlan.BandWeight(bands[i], follows, demolitionRatio, gravel));
                     }
                     share += best / newWidth;
                 }

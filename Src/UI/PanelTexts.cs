@@ -33,7 +33,7 @@ namespace RealisticRoadWorks.V3.UI
             {
                 // stepper: the kind's phases (5 construction, 3 demolition); StepIndex == StepCount when complete
                 WorksPhase firstPhase = PhasePlan.FirstPhase(st.Kind);
-                StepCount = math.min(Steps.Length, PhasePlan.StepCount(st.Kind));
+                StepCount = math.min(Steps.Length, st.Gravel ? PhasePlan.GravelStepCount : PhasePlan.StepCount(st.Kind));
                 for (int i = 0; i < StepCount; i++) Steps[i] = UiFormat.PhaseName((WorksPhase)((int)firstPhase + i));
                 StepIndex = st.IsComplete ? StepCount : math.clamp(PhasePlan.StepIndex(st.Phase), 0, StepCount);
                 StepFraction = st.IsComplete ? 1f : math.saturate(st.F);

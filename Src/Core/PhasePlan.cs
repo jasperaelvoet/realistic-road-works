@@ -375,6 +375,8 @@ namespace RealisticRoadWorks.V3
         // UI stepper: index within the kind's phases (construction 0..4, demolition 0..2); Complete = count.
         public static int StepIndex(WorksPhase ph) => ph == WorksPhase.Complete ? 5 : ph >= WorksPhase.BreakUp ? (int)ph - (int)WorksPhase.BreakUp : (int)ph;
         public static int StepCount(WorksKind kind) => kind == WorksKind.Construction ? 5 : 3;
+        // A new gravel road: survey, excavation and the gravel base (it completes at RRWConst.kGravelEndP).
+        public const int GravelStepCount = 3;
 
         // Localisation key of a phase name (Settings.cs LocaleEN has the English text).
         public static string PhaseKey(WorksPhase ph) => "RealisticRoadWorks.Phase." + ph;

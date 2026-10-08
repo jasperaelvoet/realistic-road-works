@@ -93,6 +93,7 @@ namespace RealisticRoadWorks.V3.UI
         // IsUpgrade: the project's view carries its upgrade data (ProjectView.IsUpgrade); View is that view (windows, band phases).
         public bool ModeH => Mode == VisualMode.HalfWidth && Kind == WorksKind.Construction;
         public bool IsUpgrade;
+        public bool Gravel;                    // a new gravel road: survey, excavation and the gravel base only (PhasePlan.GravelEnd)
         public UpgradeClass UpClass;           // project class (the saved edge class until the registry has the project)
         public ProjectView View;
 
@@ -298,6 +299,7 @@ namespace RealisticRoadWorks.V3.UI
 
             Rushed = (Flags & SiteFlags.Rushed) != 0;
             Incompatible = (Flags & SiteFlags.Incompatible) != 0;
+            Gravel = Kind == WorksKind.Construction && !IsUpgrade && EcsUtil.IsGravel(em, FirstEdge);
             CancelledBuild = (Flags & SiteFlags.CancelledBuild) != 0;
             Completing = Phase == WorksPhase.Complete;
             if (em.HasComponent<RoadWorksRuntime>(FirstEdge))
@@ -372,7 +374,7 @@ namespace RealisticRoadWorks.V3.UI
             WorkTime.ShiftBounds(shift, out ShiftStart, out _);
             float rate = WorkTime.Rate(Rushed, RRWDebug.WorkTimeScale);
             if (rate <= 0f) rate = WorkTime.Rate(Rushed, 1f);
-            double remaining = math.max(0.0, (double)WorkRequired * (1.0 - P));
+            double remaining = math.max(0.0, (double)WorkRequired * ((Gravel ? RRWConst.kGravelEndP : 1.0) - P));
             HoursLeft = remaining / rate / RRWConst.kFramesPerHour;
             CalendarFrames = WorkTime.CalendarFramesToFinish(normalizedTime, remaining, shift, rate);
 

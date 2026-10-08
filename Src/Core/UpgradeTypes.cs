@@ -150,6 +150,7 @@ namespace RealisticRoadWorks.V3
         None = 0,
         AllAtOnce = 1 << 0,  // every build window got lane drops at creation: all new lanes are dropped from the end of setup
         PreCover = 1 << 1,   // build bands are covered from the apply frame
+        Gravel = 1 << 2,     // the new road is a gravel road: bands are dug and gravelled (no paving, no markings), one step
     }
 
     // One band of an edge, 7 bytes when saved. Laterals in 1/16 m of the NEW curve's edge frame.
@@ -238,6 +239,7 @@ namespace RealisticRoadWorks.V3
 
         public float OuterL, OuterR;        // road outer edges (edge outline)
         public bool Elevated, Tunnel;
+        public bool Gravel;                 // a gravel road (CompositionFlags.General.Gravel): no asphalt, no markings
         public bool Readable = true;        // false: the reader found no usable lanes or outline
         public int Count;                   // strips in use
         public readonly LayoutStrip[] Strips = new LayoutStrip[kMax];
@@ -249,7 +251,7 @@ namespace RealisticRoadWorks.V3
         public void Clear()
         {
             OuterL = OuterR = 0f;
-            Elevated = Tunnel = false;
+            Elevated = Tunnel = Gravel = false;
             Readable = true;
             Count = 0;
             TrackLanes = 0;
@@ -259,7 +261,7 @@ namespace RealisticRoadWorks.V3
 
         public void CopyFrom(CompositionLayout o)
         {
-            OuterL = o.OuterL; OuterR = o.OuterR; Elevated = o.Elevated; Tunnel = o.Tunnel; Readable = o.Readable;
+            OuterL = o.OuterL; OuterR = o.OuterR; Elevated = o.Elevated; Tunnel = o.Tunnel; Gravel = o.Gravel; Readable = o.Readable;
             Count = o.Count; Array.Copy(o.Strips, Strips, kMax);
             TrackLanes = o.TrackLanes; Array.Copy(o.Tracks, Tracks, kMaxTracks);
             CarLanesF = o.CarLanesF; CarLanesB = o.CarLanesB; CalibResidual = o.CalibResidual;
@@ -641,6 +643,7 @@ namespace RealisticRoadWorks.V3
         public UpgradeBand B0, B1, B2, B3;
         public float Shift;          // lateral shift of the new curve against the old one (log / tooltip)
         public bool Reversed;        // the new curve runs against the old one
+        public bool Gravel;          // the new road is a gravel road (no paving, no re-marking)
 
         public UpgradeBand Band(int i) => i == 0 ? B0 : i == 1 ? B1 : i == 2 ? B2 : B3;
 
@@ -722,6 +725,7 @@ namespace RealisticRoadWorks.V3
         public bool AllAtOnce;       // saved flag, cleared at runtime when lane drops are no longer available (never set later)
         public bool PreCover;        // saved flag: bands are covered from the apply frame (PhasePlan.UpgradeSpans); off while Deferred
         public bool Deferred;        // the old road is live until the works' finishing (RRWDeferredNet): no cover fakes it
+        public bool Gravel;          // saved flag: gravel road works (bands dug and gravelled only)
         public uint Prims;           // 4 bits per window: effective primitive of started windows, expected primitive of later ones
         public ulong ZonesA, ZonesB; // 16 bits per window (windows 0-3, 4-7): lane groups each window closes (ZonesOf)
         // The layout APPLIED now (read it through AppliedWindow / AppliedTraffic / AppliedZones below; SetApplied writes it).

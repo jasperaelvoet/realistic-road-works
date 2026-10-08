@@ -720,6 +720,7 @@ namespace RealisticRoadWorks.V3
         private bool m_Built, m_Same, m_PrevDerived, m_EveryAllAtOnce;
 
         public bool PreCover => (SavedFlags & UpgradeFlags.PreCover) != 0;
+        public bool Gravel => (SavedFlags & UpgradeFlags.Gravel) != 0;
         // The project's roads keep their old state in the game (RRWDeferredNet; Director, every update): the old road is real, so
         // nothing paints it (no pre-covers, no old-asphalt look over the lanes in use).
         public bool Deferred;
@@ -933,7 +934,7 @@ namespace RealisticRoadWorks.V3
         }
 
         // Phase / fraction ProjectRecord.Phase / PhaseFraction show for mode H (the lead band of the current window).
-        public bool LeadPhase(float p, out WorksPhase ph, out float f) => UpgradePlan.LeadPhase(Schedule, Bands, p, out ph, out f);
+        public bool LeadPhase(float p, out WorksPhase ph, out float f) => UpgradePlan.LeadPhase(Schedule, Bands, p, out ph, out f, Gravel);
 
         // The pure view at progress p (ProjectRecord.View()).
         public UpgradeView View(float p)
@@ -950,6 +951,7 @@ namespace RealisticRoadWorks.V3
                 AllAtOnce = AllAtOnce,
                 PreCover = PreCover && !Deferred,
                 Deferred = Deferred,
+                Gravel = Gravel,
                 PreClosed = PreClosed,
                 MachineSafe = MachineSafe,
                 BandCount = (byte)math.min(Bands.Count, RRWConst.kUwMaxChainBands),

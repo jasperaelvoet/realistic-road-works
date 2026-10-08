@@ -345,7 +345,7 @@ namespace RealisticRoadWorks.V3
             if (band < 0 || band >= u.BandCount) return false;
             var b = u.Band(band);
             g = u.BandG(band);
-            UpgradePlan.Equivalent(b.Kind, u.RemarkFollows(b.Window), g, out ph, out f);
+            UpgradePlan.Equivalent(b.Kind, u.RemarkFollows(b.Window), g, out ph, out f, u.Gravel);
             return true;
         }
 
@@ -391,17 +391,19 @@ namespace RealisticRoadWorks.V3
         // Job form of a band front (Machines' front reference at a render-time p): the band's equivalent phase over the trimmed
         // chain. g = UpgradePlan.BandG(G0, gw) with UpgradePlan.At(schedule, p, ...) for the band's window (1 after it, G0 before
         // it). The re-marking band under Half uses MainFront(Finishing, g, U, c4Swap, floor) instead (the C4a / C4b sweeps).
-        public static float UpgradeFrontOf(BandKind kind, bool remarkFollows, float g, float trim0, float trim1)
+        public static float UpgradeFrontOf(BandKind kind, bool remarkFollows, float g, float trim0, float trim1, bool gravel = false)
         {
             float L = math.max(0f, trim1 - trim0);
             if (kind == BandKind.Remark) return trim0 + MainFront(WorksPhase.Finishing, g, L);
-            UpgradePlan.Equivalent(kind, remarkFollows, g, out var ph, out float f);
+            UpgradePlan.Equivalent(kind, remarkFollows, g, out var ph, out float f, gravel);
             return trim0 + MainFront(ph, f, L);
         }
 
         // Share of a band's own progress its equivalent phase takes (the ranges of UpgradePlan.Equivalent).
-        public static float UpgradePhaseShare(BandKind kind, bool remarkFollows, WorksPhase ph)
+        public static float UpgradePhaseShare(BandKind kind, bool remarkFollows, WorksPhase ph, bool gravel = false)
         {
+            if (gravel && (kind == BandKind.Build || kind == BandKind.Rebuild))
+                return ph == WorksPhase.Excavation ? RRWConst.kUwGravelDig : ph == WorksPhase.Foundation ? 1f - RRWConst.kUwGravelDig : 0f;
             switch (kind)
             {
                 case BandKind.Remark: return 1f;
@@ -417,10 +419,10 @@ namespace RealisticRoadWorks.V3
         // Range [gLo, gHi) of a band's own progress g its equivalent phase covers (the order and shares of UpgradePlan.Equivalent:
         // build / rebuild Excavation, Foundation, Paving (+ Finishing without a re-marking window after it); remove BreakUp,
         // Removal, Restore; re-marking Finishing over [0, 1]). False (0, 0) for a phase the kind does not run.
-        public static bool UpgradePhaseRange(BandKind kind, bool remarkFollows, WorksPhase ph, out float gLo, out float gHi)
+        public static bool UpgradePhaseRange(BandKind kind, bool remarkFollows, WorksPhase ph, out float gLo, out float gHi, bool gravel = false)
         {
             gLo = gHi = 0f;
-            float share = UpgradePhaseShare(kind, remarkFollows, ph);
+            float share = UpgradePhaseShare(kind, remarkFollows, ph, gravel);
             if (!(share > 0f)) return false;
             if (kind == BandKind.Remark) { gHi = 1f; return true; }
             for (int i = 0; i < 4; i++)
@@ -428,7 +430,7 @@ namespace RealisticRoadWorks.V3
                 var p = kind == BandKind.Remove ? (i == 0 ? WorksPhase.BreakUp : i == 1 ? WorksPhase.Removal : i == 2 ? WorksPhase.Restore : WorksPhase.None)
                                                 : (i == 0 ? WorksPhase.Excavation : i == 1 ? WorksPhase.Foundation : i == 2 ? WorksPhase.Paving : WorksPhase.Finishing);
                 if (p == ph) break;
-                gLo += UpgradePhaseShare(kind, remarkFollows, p);
+                gLo += UpgradePhaseShare(kind, remarkFollows, p, gravel);
             }
             gHi = math.min(1f, gLo + share);
             return true;
@@ -445,7 +447,7 @@ namespace RealisticRoadWorks.V3
             if (b.Window < 0 || b.Window >= u.WindowCount) return 0f;
             UpgradeBandPhase(v, band, out var ph, out _, out _);
             float win = u.Schedule.P1(b.Window) - u.Schedule.P0(b.Window);
-            return v.WorkSeconds * win * UpgradePhaseShare(b.Kind, u.RemarkFollows(b.Window), ph) / math.max(1e-3f, 1f - math.saturate(b.G0));
+            return v.WorkSeconds * win * UpgradePhaseShare(b.Kind, u.RemarkFollows(b.Window), ph, u.Gravel) / math.max(1e-3f, 1f - math.saturate(b.G0));
         }
 
         // Front speed of the lead band's crew (m/s machine time; 0 = unknown): the trimmed chain over the sweep share of its phase.

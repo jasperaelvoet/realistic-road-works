@@ -192,12 +192,12 @@ namespace RealisticRoadWorks.V3
         // ------------------------------------------------------------------ windows
 
         // Duration weight per metre of band width (relative to a full rebuild of that width).
-        public static float KindFactor(BandKind kind, bool remarkFollows, float demolitionRatio)
+        public static float KindFactor(BandKind kind, bool remarkFollows, float demolitionRatio, bool gravel = false)
         {
             switch (kind)
             {
-                case BandKind.Build: return remarkFollows ? RRWConst.kUwKindBuildRemark : RRWConst.kUwKindBuild;
-                case BandKind.Rebuild: return RRWConst.kUwKindRebuild;
+                case BandKind.Build: return gravel ? RRWConst.kUwKindBuildGravel : remarkFollows ? RRWConst.kUwKindBuildRemark : RRWConst.kUwKindBuild;
+                case BandKind.Rebuild: return gravel ? RRWConst.kUwKindRebuildGravel : RRWConst.kUwKindRebuild;
                 case BandKind.Remove: return RRWConst.kUwKindRemove * math.max(0f, demolitionRatio);
                 default: return RRWConst.kUwKindRemark;
             }
@@ -210,8 +210,8 @@ namespace RealisticRoadWorks.V3
         }
 
         // Weight of one band (metres x kind factor x work left).
-        public static float BandWeight(in ChainBand b, bool remarkFollows, float demolitionRatio) =>
-            math.max(0f, b.Width) * KindFactor(b.Kind, remarkFollows, demolitionRatio) * (1f - math.saturate(b.G0));
+        public static float BandWeight(in ChainBand b, bool remarkFollows, float demolitionRatio, bool gravel = false) =>
+            math.max(0f, b.Width) * KindFactor(b.Kind, remarkFollows, demolitionRatio, gravel) * (1f - math.saturate(b.G0));
 
         // Assigns every chain band to a window (ChainBand.Window) and fixes the window ends. Order: build / rebuild windows (with
         // the remove bands as extra crews in the first one), then the re-marking window last.
@@ -222,8 +222,10 @@ namespace RealisticRoadWorks.V3
         //  * window weight = the largest band weight in it (parallel bands cost the widest); ends proportional to the weights over
         //    [SetupP, 1 - kUwTeardownP], at least 1/255 per window.
         //  * rushedAtCreation: no setup share.
-        public static UpgradeSchedule Windows(List<ChainBand> bands, bool parallelBuild, bool rushedAtCreation, float demolitionRatio)
+        //  * gravel: every band in one window (a gravel road is dug and gravelled in one step).
+        public static UpgradeSchedule Windows(List<ChainBand> bands, bool parallelBuild, bool rushedAtCreation, float demolitionRatio, bool gravel = false)
         {
+            if (gravel) parallelBuild = true;
             var s = new UpgradeSchedule();
             if (bands == null) return s;
             bool anyL = false, anyM = false, anyR = false, anyRemove = false, anyRemark = false;
@@ -272,7 +274,7 @@ namespace RealisticRoadWorks.V3
                 if (w < 0) w = 0;
                 b.Window = w;
                 bands[i] = b;
-                weight[w] = math.max(weight[w], BandWeight(b, anyRemark && w != wRemark, demolitionRatio));
+                weight[w] = math.max(weight[w], BandWeight(b, anyRemark && w != wRemark, demolitionRatio, gravel));
             }
             float total = 0f;
             for (int k = 0; k < n; k++) { weight[k] = math.max(weight[k], RRWConst.kUwMinWindowWeight); total += weight[k]; }
@@ -334,9 +336,16 @@ namespace RealisticRoadWorks.V3
         // Equivalent phase of a band at its own progress g. Build / rebuild with a re-marking window after it: excavation,
         // foundation, paving (the markings come in their own window); without: plus finishing. Remove: break-up, removal,
         // restore. Remark: finishing with f = g (the half swap at RRWConst.kC4SwapF like the staged markings of new roads).
-        public static void Equivalent(BandKind k, bool remarkFollows, float g, out WorksPhase ph, out float f)
+        // gravel: a build / rebuild band is dug, then gravelled (Excavation, Foundation), nothing after.
+        public static void Equivalent(BandKind k, bool remarkFollows, float g, out WorksPhase ph, out float f, bool gravel = false)
         {
             g = math.saturate(g);
+            if (gravel && (k == BandKind.Build || k == BandKind.Rebuild))
+            {
+                if (g < RRWConst.kUwGravelDig) { ph = WorksPhase.Excavation; f = g / RRWConst.kUwGravelDig; }
+                else { ph = WorksPhase.Foundation; f = math.saturate((g - RRWConst.kUwGravelDig) / (1f - RRWConst.kUwGravelDig)); }
+                return;
+            }
             switch (k)
             {
                 case BandKind.Remark:
@@ -380,7 +389,7 @@ namespace RealisticRoadWorks.V3
 
         // Phase / fraction the project shows: the lead band of the current window (setup: window 0 at g = 0; teardown: the last
         // window at g = 1). False when there is no band.
-        public static bool LeadPhase(in UpgradeSchedule s, IList<ChainBand> bands, float p, out WorksPhase ph, out float f)
+        public static bool LeadPhase(in UpgradeSchedule s, IList<ChainBand> bands, float p, out WorksPhase ph, out float f, bool gravel = false)
         {
             ph = WorksPhase.Survey; f = 0f;
             if (bands == null || bands.Count == 0 || s.N == 0) return false;
@@ -389,7 +398,7 @@ namespace RealisticRoadWorks.V3
             int lead = LeadBand(bands, win);
             if (lead < 0) return false;
             float g = w < 0 ? math.saturate(bands[lead].G0) : w >= s.N ? 1f : BandG(bands[lead].G0, gw);
-            Equivalent(bands[lead].Kind, RemarkFollows(bands, win), g, out ph, out f);
+            Equivalent(bands[lead].Kind, RemarkFollows(bands, win), g, out ph, out f, gravel);
             return true;
         }
 

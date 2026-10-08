@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [3.4.0] - 2026-10-09
+
+### Added
+
+- **Gravel roads in one step.** Building a gravel road digs and lays the gravel base, and the road is done: no paving, no
+  markings, about 40 % less time than an asphalt road. An upgrade to a gravel road runs as a single step (both sides at once) and
+  has no re-marking.
+
+### Fixed
+
+- Upgrading a road with the replace tool dragged against the road's direction tore up its junctions and mirrored the works.
+  Such an upgrade now places the new road at once (the works run on it), and saves affected by 3.3.0 repair themselves on load.
+- A kerb that only moves by a metre is left to the finishing only at the edge of the road; narrow raised islands inside the
+  carriageway are built as before.
+
+[3.4.0]: https://github.com/jasperaelvoet/realistic-road-works/releases/tag/v3.4.0
+
 ## [3.3.0] - 2026-10-08
 
 ### Added

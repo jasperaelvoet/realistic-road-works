@@ -153,6 +153,8 @@ namespace RealisticRoadWorks.V3
                 float lo = cuts[k], hi = cuts[k + 1];
                 if (hi - lo < 1e-4f) continue;
                 Chg c = ChangeAt(old, neu, (lo + hi) * 0.5f, lines);
+                // a gravel road has no markings: nothing to re-mark
+                if (neu.Gravel && (c == Chg.Remark || c == Chg.RemarkLine)) c = Chg.None;
                 if (c == Chg.None) continue;
                 int last = runs.Count - 1;
                 if (last >= 0 && runs[last].C == c && lo - runs[last].Hi < 1e-4f) { var r = runs[last]; r.Hi = hi; runs[last] = r; }
@@ -165,7 +167,7 @@ namespace RealisticRoadWorks.V3
                 var r = runs[i];
                 if (r.C == Chg.Remark || r.C == Chg.RemarkLine || r.Width >= RRWConst.kUwBandMinWidth - kWidthEps) continue;
                 bool touches = Touches(r.Lo, r.Hi, oLo, oHi) || Touches(r.Lo, r.Hi, nLo, nHi);
-                if (touches) { r.C = Chg.Remark; runs[i] = r; }
+                if (touches && !neu.Gravel) { r.C = Chg.Remark; runs[i] = r; }
                 else runs.RemoveAt(i);
             }
             MergeSameRuns(runs);
@@ -228,7 +230,7 @@ namespace RealisticRoadWorks.V3
             // 4b. a narrow rebuild left on its own (a kerb that moves by a metre: a sidewalk a little wider or narrower) is no works
             // strip of its own: nobody fences off a lane to move a kerb by that much; the new kerb comes with the finishing
             for (int i = entries.Count - 1; i >= 0; i--)
-                if (entries[i].C == Chg.Rebuild && entries[i].Width < RRWConst.kUwKerbShiftMax)
+                if (entries[i].C == Chg.Rebuild && entries[i].Width < RRWConst.kUwKerbShiftMax && KerbShift(old, neu, entries[i]))
                 {
                     if (trace != null) trace.Add("narrow rebuild [" + entries[i].Lo.ToString("0.##") + "," + entries[i].Hi.ToString("0.##") + "] left to the finishing");
                     entries.RemoveAt(i);
@@ -253,8 +255,8 @@ namespace RealisticRoadWorks.V3
             entries.Sort((p, q) => p.Lo.CompareTo(q.Lo));
             // every change of the carriageway is re-marked: a strip built or rebuilt into the new carriageway, or removed from the old
             // one, leaves lines to paint even where the lane layout itself stays
-            bool repaint = remark;
-            for (int i = 0; i < entries.Count && !repaint; i++)
+            bool repaint = remark && !neu.Gravel;
+            for (int i = 0; i < entries.Count && !repaint && !neu.Gravel; i++)
             {
                 var e = entries[i];
                 if (e.C == Chg.Remark) continue;
@@ -412,6 +414,19 @@ namespace RealisticRoadWorks.V3
             for (int k = 0; k < unmatchedLines.Count; k++)
                 if (math.abs(x - unmatchedLines[k]) <= RRWConst.kUwBoundaryTol) return Chg.RemarkLine;
             return Chg.None;
+        }
+
+        // A rebuild strip that only moves a kerb: the raised side of it (old or new) is a sidewalk or a verge at the edge of the
+        // carriageway, not an island or a median inside it.
+        private static bool KerbShift(CompositionLayout old, CompositionLayout neu, in Run r)
+        {
+            float x = (r.Lo + r.Hi) * 0.5f;
+            var raised = old.SurfaceAt(x) == SurfaceClass.Carriageway ? neu : old;
+            var k = raised.KindAt(x, out _);
+            if (k != StripKind.Sidewalk && k != StripKind.Verge) return false;
+            // an island has carriageway on both sides; a kerb has it on one side only
+            bool lo = raised.SurfaceAt(r.Lo - 0.1f) == SurfaceClass.Carriageway, hi = raised.SurfaceAt(r.Hi + 0.1f) == SurfaceClass.Carriageway;
+            return !(lo && hi);
         }
 
         private static bool Touches(float lo, float hi, float cLo, float cHi) =>

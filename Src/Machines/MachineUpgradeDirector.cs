@@ -38,7 +38,7 @@ namespace RealisticRoadWorks.V3.Machines
             }
             var b = u.Band(band);
             PhasePlan.UpgradeBandPhase(v, band, out var ph, out _, out _);
-            PhasePlan.UpgradePhaseRange(b.Kind, u.RemarkFollows(b.Window), ph, out float ga, out float gb);
+            PhasePlan.UpgradePhaseRange(b.Kind, u.RemarkFollows(b.Window), ph, out float ga, out float gb, u.Gravel);
             float p0 = u.Schedule.P0(b.Window), p1 = u.Schedule.P1(b.Window);
             float g0 = math.saturate(b.G0), span = 1f - g0;
             fr.Phase = (byte)ph;

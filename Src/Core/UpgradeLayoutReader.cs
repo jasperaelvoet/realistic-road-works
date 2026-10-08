@@ -420,6 +420,7 @@ namespace RealisticRoadWorks.V3
             var verdict = UpgradeDiff.Decide(fv, aligned, cls, ref spec, out instant);
             spec.Shift = al.Shift;
             spec.Reversed = al.Reversed;
+            spec.Gravel = neu.L.Gravel;
             return verdict;
         }
 
@@ -440,6 +441,7 @@ namespace RealisticRoadWorks.V3
         {
             r.L.Elevated = (r.CompFlags.m_General & CompositionFlags.General.Elevated) != 0;
             r.L.Tunnel = (r.CompFlags.m_General & CompositionFlags.General.Tunnel) != 0;
+            r.L.Gravel = (r.CompFlags.m_General & CompositionFlags.General.Gravel) != 0;
             r.L.Normalise();
             r.L.Readable = r.HasGeometry && r.Cars + r.Bikes + r.Tracks > 0 && !float.IsNaN(r.L.CarriageLo);
         }

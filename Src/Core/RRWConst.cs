@@ -367,6 +367,10 @@ namespace RealisticRoadWorks.V3
         public const float kUwKindRebuild = 0.80f;
         public const float kUwKindRemove = 0.65f;        // times the demolition / construction hours ratio
         public const float kUwKindRemark = 0.14f;
+        public const float kUwKindBuildGravel = 0.45f;   // a gravel strip: dug and gravelled, no paving or markings
+        public const float kUwKindRebuildGravel = 0.40f;
+        public const float kUwGravelDig = 0.55f;         // share of a gravel band's progress that is digging (the rest: gravel)
+        public const float kGravelEndP = kC3;            // a new gravel road is complete once its gravel base is laid (no paving / markings)
         public const float kUwStagedOverhead = 0.15f;    // extra time when traffic keeps running beside the works
         public const float kUwSwitchHours = 0.25f;       // per window switch
         public const float kUwMinHours = 2.0f, kUwMinHoursRemark = 1.0f;

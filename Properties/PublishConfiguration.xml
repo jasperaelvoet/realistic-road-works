@@ -54,15 +54,14 @@ Source code and issue tracker: https://github.com/jasperaelvoet/realistic-road-w
 	<!--Link to the forum post where the mod can be discussed-->
 	<ForumLink Value="" />
 	<!--Version of the mod-->
-	<ModVersion Value="3.3.0" />
+	<ModVersion Value="3.4.0" />
 	<!--Recommended version of the base game to use the mod-->
 	<GameVersion Value="1.6.*" />
 	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
 	<ChangeLog>
-3.3.0: during a road upgrade the old road, its junctions and connections stay until the works are done; the upgraded road
-appears at the finishing. Every upgrade ends with re-marking: on roads with two or more lanes per direction the painting crew
-works on the move and only the lanes beside it close over a short moving stretch. The works start right at the old kerb, small
-kerb shifts need no works, ground textures no longer slide, and the yellow lines join the road's own markings.
+3.4.0: gravel roads are built in one step: dig and lay the gravel base, no paving or markings. Upgrades to a gravel road run
+as a single step without re-marking. Fixed: an upgrade dragged against the road's direction tore up its junctions; saves affected
+by 3.3.0 repair themselves on load.
 	</ChangeLog>
 	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
 	<ExternalLink Type="github" Url="https://github.com/jasperaelvoet/realistic-road-works" />

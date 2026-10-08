@@ -118,6 +118,14 @@ namespace RealisticRoadWorks.V3
             return true;
         }
 
+        // A gravel road (its composition carries CompositionFlags.General.Gravel): no asphalt and no markings.
+        public static bool IsGravel(EntityManager em, Entity edge)
+        {
+            if (!em.Exists(edge) || !em.HasComponent<Composition>(edge)) return false;
+            var c = em.GetComponentData<Composition>(edge).m_Edge;
+            return ValidComposition(em, c) && (em.GetComponentData<NetCompositionData>(c).m_Flags.m_General & CompositionFlags.General.Gravel) != 0;
+        }
+
         public static float CompositionWidth(EntityManager em, Entity edge)
         {
             if (em.HasComponent<Composition>(edge))

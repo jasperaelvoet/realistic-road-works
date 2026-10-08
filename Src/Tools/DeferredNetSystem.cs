@@ -7,6 +7,7 @@ using Game.Tools;
 using RealisticRoadWorks.Dev;
 using Unity.Collections;
 using Unity.Entities;
+using Unity.Mathematics;
 
 namespace RealisticRoadWorks.V3
 {
@@ -28,8 +29,45 @@ namespace RealisticRoadWorks.V3
             m_Deferred = GetEntityQuery(ComponentType.ReadOnly<RRWDeferredNet>(), ComponentType.Exclude<Deleted>(), ComponentType.Exclude<Temp>());
         }
 
+        private uint m_RepairDue;
+
+        // Deferred edges whose start / end do not match their old curve (3.3.0 deferred upgrades where the tool had turned the edge
+        // round): their projects switch to the upgraded road at once (its curve and start / end agree, and the works were planned
+        // for it). Runs every 128 updates while deferred entities exist (cheap: a handful of entities).
+        private void RepairEdges(EntityManager em)
+        {
+            if (m_Deferred.IsEmptyIgnoreFilter) return;
+            var ents = m_Deferred.ToEntityArray(Allocator.Temp);
+            foreach (var e in ents)
+            {
+                if (!em.HasComponent<Edge>(e) || !Misaligned(em, e)) continue;
+                uint id = em.GetComponentData<RRWDeferredNet>(e).m_ProjectId;
+                if (DeferredNet.SwitchRequests.Add(id))
+                    RRWLog.Info("deferred: project #" + id + " has a road piece turned round against its old curve (e" + e.Index + "): switching it to the upgraded road now");
+            }
+            ents.Dispose();
+        }
+
+        // The edge's start / end run against its curve (start node nearer the curve end).
+        public static bool Misaligned(EntityManager em, Entity e)
+        {
+            if (!em.HasComponent<Edge>(e) || !em.HasComponent<Curve>(e)) return false;
+            var ed = em.GetComponentData<Edge>(e);
+            if (!em.HasComponent<Node>(ed.m_Start) || !em.HasComponent<Node>(ed.m_End)) return false;
+            var c = em.GetComponentData<Curve>(e).m_Bezier;
+            float3 ps = em.GetComponentData<Node>(ed.m_Start).m_Position, pe = em.GetComponentData<Node>(ed.m_End).m_Position;
+            float keep = math.distance(c.a.xz, ps.xz) + math.distance(c.d.xz, pe.xz);
+            float swap = math.distance(c.a.xz, pe.xz) + math.distance(c.d.xz, ps.xz);
+            return swap + 0.5f < keep;
+        }
+
         protected override void OnUpdate()
         {
+            if (unchecked((int)(RRWClock.UpdateIndex - m_RepairDue)) >= 0)
+            {
+                m_RepairDue = RRWClock.UpdateIndex + 128;
+                RepairEdges(EntityManager);
+            }
             if (DeferredNet.PendingRevert.Count == 0 && DeferredNet.SwitchRequests.Count == 0 && DeferredNet.DropRequests.Count == 0) return;
             var em = EntityManager;
             m_Touch.Clear();
@@ -44,6 +82,8 @@ namespace RealisticRoadWorks.V3
         private void Revert(EntityManager em)
         {
             int n = 0;
+            // nodes first: an edge's start / end follow from where its nodes are (AlignEdge)
+            DeferredNet.PendingRevert.Sort((a, b) => (a.Kind == DeferredKind.Node ? 0 : 1).CompareTo(b.Kind == DeferredKind.Node ? 0 : 1));
             foreach (var s in DeferredNet.PendingRevert)
             {
                 var e = s.Entity;
@@ -60,7 +100,10 @@ namespace RealisticRoadWorks.V3
                     if (s.OldPrefab != Entity.Null) em.SetComponentData(e, new PrefabRef { m_Prefab = s.OldPrefab });
                     SetUpgraded(em, e, s.OldHasUpgraded, s.OldUpgraded);
                     SetElevation(em, e, s.OldHasElevation, s.OldElevation);
-                    if (s.Kind == DeferredKind.Edge) em.SetComponentData(e, new Curve { m_Bezier = s.OldCurve, m_Length = Colossal.Mathematics.MathUtils.Length(s.OldCurve) });
+                    if (s.Kind == DeferredKind.Edge)
+                    {
+                        em.SetComponentData(e, new Curve { m_Bezier = s.OldCurve, m_Length = Colossal.Mathematics.MathUtils.Length(s.OldCurve) });
+                    }
                     else
                     {
                         var node = em.GetComponentData<Node>(e);
@@ -88,6 +131,8 @@ namespace RealisticRoadWorks.V3
             try
             {
                 int sw = 0, dr = 0;
+                // nodes first, then the edges (their start / end follow the nodes)
+                ents.Sort(new NodesFirst { Em = em });
                 foreach (var e in ents)
                 {
                     var d = em.GetComponentData<RRWDeferredNet>(e);
@@ -119,13 +164,39 @@ namespace RealisticRoadWorks.V3
             SetUpgraded(em, e, d.m_HasUpgraded, d.m_Upgraded);
             SetElevation(em, e, d.m_HasElevation, d.m_Elevation);
             if (d.Kind == DeferredKind.Edge && em.HasComponent<Curve>(e))
+            {
                 em.SetComponentData(e, new Curve { m_Bezier = d.m_Curve, m_Length = Colossal.Mathematics.MathUtils.Length(d.m_Curve) });
+                AlignEdge(em, e);
+            }
             else if (d.Kind == DeferredKind.Node && em.HasComponent<Node>(e))
             {
                 var node = em.GetComponentData<Node>(e);
                 node.m_Position = d.m_Position; node.m_Rotation = d.m_Rotation;
                 em.SetComponentData(e, node);
             }
+        }
+
+        private struct NodesFirst : IComparer<Entity>
+        {
+            public EntityManager Em;
+            public int Compare(Entity a, Entity b) => Rank(a).CompareTo(Rank(b));
+            private int Rank(Entity e) => Em.HasComponent<Node>(e) ? 0 : 1;
+        }
+
+        // An edge's start node must be the one at its curve start: the replace tool can turn an edge round (Edge start / end swapped
+        // together with the curve), so after writing one curve the pair is put back in the order of that curve. True when swapped.
+        public static bool AlignEdge(EntityManager em, Entity e)
+        {
+            if (!em.HasComponent<Edge>(e) || !em.HasComponent<Curve>(e)) return false;
+            var ed = em.GetComponentData<Edge>(e);
+            if (!em.HasComponent<Node>(ed.m_Start) || !em.HasComponent<Node>(ed.m_End)) return false;
+            var c = em.GetComponentData<Curve>(e).m_Bezier;
+            float3 ps = em.GetComponentData<Node>(ed.m_Start).m_Position, pe = em.GetComponentData<Node>(ed.m_End).m_Position;
+            float keep = math.distance(c.a.xz, ps.xz) + math.distance(c.d.xz, pe.xz);
+            float swap = math.distance(c.a.xz, pe.xz) + math.distance(c.d.xz, ps.xz);
+            if (!(swap + 0.5f < keep)) return false;
+            em.SetComponentData(e, new Edge { m_Start = ed.m_End, m_End = ed.m_Start });
+            return true;
         }
 
         private static void SetUpgraded(EntityManager em, Entity e, bool has, CompositionFlags flags)

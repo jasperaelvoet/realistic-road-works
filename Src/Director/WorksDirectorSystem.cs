@@ -661,6 +661,14 @@ namespace RealisticRoadWorks.V3.Director
             }
             if (held) ps.Carry = 0.0;
 
+            // a new gravel road is finished once its gravel base is laid: no paving, no markings
+            if (kind == WorksKind.Construction && !upgrade && done < req && done >= (uint)math.ceil(RRWConst.kGravelEndP * req)
+                && m_PE.Count > 0 && EcsUtil.IsGravel(em, m_PE[0]))
+            {
+                done = req;
+                RRWLog.Info("director: project #" + proj.Id + " is a gravel road: complete with its gravel base (no paving or markings)");
+            }
+
             // write back (read-modify-write of every edge's saved site) only when something changed
             if (legacyPaused && !ps.LegacyPausedLogged)
             {

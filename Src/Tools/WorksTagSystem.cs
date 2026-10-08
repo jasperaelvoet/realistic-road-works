@@ -234,6 +234,23 @@ namespace RealisticRoadWorks.V3.Tooling
                 int start = DeferredNet.PendingRevert.Count;
                 Entity anySite = Entity.Null;
                 foreach (var kv in m_Upgrades.DeferTargets) { anySite = kv.Key; break; }
+                // an edge the tool turned round (its start / end swapped with the curve) is not deferred: the works and the chain
+                // read start / end in the new road's direction, which the old curve does not have
+                for (int i = 0; i < entities.Length; i++)
+                {
+                    var orig = temps[i].m_Original;
+                    if (!em.HasComponent<Edge>(entities[i]) || !em.HasComponent<Edge>(orig)) continue;
+                    var te = em.GetComponentData<Edge>(entities[i]);
+                    var oe = em.GetComponentData<Edge>(orig);
+                    Entity ts = em.HasComponent<Temp>(te.m_Start) ? em.GetComponentData<Temp>(te.m_Start).m_Original : te.m_Start;
+                    Entity tEnd = em.HasComponent<Temp>(te.m_End) ? em.GetComponentData<Temp>(te.m_End).m_Original : te.m_End;
+                    if (ts == oe.m_End && tEnd == oe.m_Start)
+                    {
+                        RRWLog.Info("tools: upgrade not deferred (the tool turned road piece " + RRWLog.E(orig) + " round): the new road is placed at once");
+                        DeferredNet.PendingRevert.RemoveRange(start, DeferredNet.PendingRevert.Count - start);
+                        return;
+                    }
+                }
                 for (int i = 0; i < entities.Length; i++)
                 {
                     var temp = entities[i];
