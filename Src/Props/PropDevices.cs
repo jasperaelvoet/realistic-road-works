@@ -632,7 +632,7 @@ namespace RealisticRoadWorks.V3.Props
                 {
                     Key = key, Kind = PropKind.Signal, U = u, Lateral = lat, LatChain = true, Y = YMode.Curve, Rot = RotMode.Facing,
                     YawExtra = (start ? 180f : 0f) + (RRWGates.SignalYawFlip ? 180f : 0f), JitterDeg = 0.5f, Fill = 255, Prefab = head,
-                    Group = DerivedGroup.PropStatic, NoOwner = true,
+                    Group = DerivedGroup.PropStatic,   // owned by the works edge: the light's meshes take their draw layer from the owner
                 });
                 if (!pp.Slots.TryGetValue(key, out var slot) || slot.Entity == Entity.Null || !EntityManager.Exists(slot.Entity)) continue;
                 if (!EntityManager.HasComponent<Game.Objects.TrafficLight>(slot.Entity)) continue;
