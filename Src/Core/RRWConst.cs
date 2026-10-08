@@ -375,6 +375,8 @@ namespace RealisticRoadWorks.V3
         public const float kUwDropInset = 0.2f;          // a car lane is dropped when its centre lies inside [Lo + inset, Hi - inset] of a band
         public const bool kUwShuttleHeadsOn = true;      // portable signal heads at the ends of a one-lane section (TrafficLightCar01,
                                                          // owned by the works edge: unowned, its meshes get no draw layer)
+        public const float kUwLaneTaperFrom = 4f;        // temporary lanes: metres from each edge end with no shift ...
+        public const float kUwLaneTaperTo = 24f;         // ... and with the full shift (the yellow lines stop here)
         public const float kUwShuttleMaxLength = 300f;   // one-lane alternating operation only over sections up to this long
         public const float kUwShuttleGreenSec = 25f;     // green per direction (game seconds at normal speed)
         public const float kUwShuttleClearMinSec = 4f;   // all-red at least this long ...

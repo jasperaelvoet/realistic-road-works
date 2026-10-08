@@ -26,7 +26,7 @@ namespace RealisticRoadWorks.V3.Traffic
 {
     public static class TrafficLaneShift
     {
-        public const float kTaperFrom = 4f, kTaperTo = 24f;   // metres from each edge end: no shift .. full shift
+        public const float kTaperFrom = RRWConst.kUwLaneTaperFrom, kTaperTo = RRWConst.kUwLaneTaperTo;   // metres from each edge end
         public const uint kRampSimFrames = 300;               // ~5 s at normal speed
         public const float kSettle = 0.02f;                    // metres: applied counts as reached
 

@@ -555,6 +555,23 @@ namespace RealisticRoadWorks.V3.Surfaces
                 Layers = DecalLayers.Terrain | DecalLayers.Roads, Priority = -92, Smoothness = kSubgradeSmoothness, Tint = SurfacePalette.SubgradeTint,
                 Alpha = SurfacePalette.SubgradeAlpha, Layer = SurfaceLayer.RoadDirt, RaisedQueue = true,
             });
+            // Upgrade works, the old road that still carries traffic: the road asphalt texture worn grey and matte, over the new
+            // road's markings (Terrain|Roads, raised queue, the cover's priority). The fresh asphalt cover takes over where a crew paved.
+            list.Add(new SurfaceCloneSpec
+            {
+                Name = PrefabNames.OldAsphaltCover, Source = PrefabNames.SrcConcrete,
+                BaseTex = PrefabNames.TexAsphaltBase, NormalTex = PrefabNames.TexAsphaltNormal, MaskTex = PrefabNames.TexAsphaltMask,
+                Layers = DecalLayers.Terrain | DecalLayers.Roads, Priority = -89, Smoothness = SurfacePalette.kOldAsphaltSmoothness,
+                Tint = SurfacePalette.OldAsphaltCoverTint, Layer = SurfaceLayer.OldAsphaltCover, RaisedQueue = true,
+            });
+            // Upgrade works, a strip that is not dug yet (the new road already lies there): the ground it was, grass, on
+            // Terrain|Roads at the raised queue so it also hides the new road surface, its kerb and its markings.
+            list.Add(new SurfaceCloneSpec
+            {
+                Name = PrefabNames.GroundCover, Source = PrefabNames.SrcGrass,
+                Layers = DecalLayers.Terrain | DecalLayers.Roads, Priority = -92, Smoothness = kTopsoilSmoothness,
+                Layer = SurfaceLayer.GroundCover, RaisedQueue = true,
+            });
             // Upgrade works, the removed strip outside the narrowed road before it is broken up: the road asphalt texture
             // worn grey and matte. Terrain only and the normal queue (it lies beside the road, never on it). Only drawn while
             // RRWGates.UpgradeOldAsphalt is on; Base Course Cover takes its place otherwise.
@@ -642,7 +659,8 @@ namespace RealisticRoadWorks.V3.Surfaces
         public static readonly float3 TopsoilTint = RRWConst.kTopsoilTint;            // freshly turned soil (0.90, .78, .69; was (1.0, .92, .70): yellow sand)
         public static readonly float3 SubgradeTint = RRWConst.kSubgradeTint;          // verified "Subgrade Src" brown dirt (.85, .75, .65)
         public static readonly float3 AsphaltTint = new float3(RRWConst.kAsphaltTint); // verified very dark fresh asphalt (.45)
-        public static readonly float3 OldAsphaltTint = new float3(0.70f);              // worn old asphalt (the fresh asphalt is .45)
+        public static readonly float3 OldAsphaltTint = new float3(0.70f);
+        public static readonly float3 OldAsphaltCoverTint = new float3(0.9f);          // the old road in use: worn, close to the vanilla road surface              // worn old asphalt (the fresh asphalt is .45)
         public static readonly float3 TempMarkingTint = RRWConst.kTempMarkingTint;     // works yellow temporary lines (Y1, Concrete)
         public static readonly float3 TempMarkingTintY2 = new float3(1.15f, 0.95f, 0.20f); // experimental variant Y2 (Sand Surface 01)
         public static readonly float3 TempMarkingTintY3 = new float3(1.10f, 0.85f, 0.12f); // experimental variant Y3 (Pavement Surface 01)

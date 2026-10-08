@@ -211,7 +211,11 @@ namespace RealisticRoadWorks.V3
                                   // sub-strips without traffic (PhasePlan.UpgradeSpans)
         OldAsphalt = 8,           // upgrade works: "RRW Old Asphalt" on the removed strip outside the new road (Terrain only), only with
                                   // RRWGates.UpgradeOldAsphalt; Base Course Cover takes its place otherwise
-        Count = 9,
+        OldAsphaltCover = 9,      // upgrade works: "RRW Old Asphalt Cover" the old road that still carries traffic (worn asphalt over the
+                                  // new road's markings; Terrain|Roads, raised queue, prio -89)
+        GroundCover = 10,         // upgrade works: "RRW Ground Cover" the ground of a strip not dug yet (grass over the new road;
+                                  // Terrain|Roads, raised queue, prio -92)
+        Count = 11,
     }
 
     // Lateral band a surface polygon covers.

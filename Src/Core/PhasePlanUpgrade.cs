@@ -463,7 +463,7 @@ namespace RealisticRoadWorks.V3
         private static SurfaceBand UpgradeBandOf(SurfaceLayer l, in ProjectView v)
         {
             if (l == SurfaceLayer.TempMarking) return SurfaceBand.TempLines;
-            if ((l == SurfaceLayer.FreshAsphalt || l == SurfaceLayer.FreshAsphaltCover) && v.HalvesActive && RRWGates.HalfCovers)
+            if ((l == SurfaceLayer.FreshAsphalt || l == SurfaceLayer.FreshAsphaltCover || l == SurfaceLayer.OldAsphaltCover) && v.HalvesActive && RRWGates.HalfCovers)
                 return SurfaceBand.CarriageHalf;
             return SurfaceBand.WorksBand;
         }
@@ -532,15 +532,16 @@ namespace RealisticRoadWorks.V3
             {
                 case BandKind.Remark:
                 {
-                    if (after || layer != SurfaceLayer.FreshAsphaltCover) return;
+                    if (after) return;
                     var prim = u.Prim(b.Window);
-                    bool covers = prim == BandTraffic.Half || prim == BandTraffic.Carriageway || UpgradeUndecided(prim);
+                    bool covers = prim == BandTraffic.Half || prim == BandTraffic.Carriageway || UpgradeUndecided(prim) || prim == BandTraffic.Drop;
                     if (before)
                     {
-                        if (pre && covers) set.Add(full);
+                        // the old road (its own laterals leave out the new strips built already) carries traffic until its window
+                        if (pre && covers && layer == SurfaceLayer.OldAsphaltCover) set.Add(full);
                         return;
                     }
-                    if (v.HalvesActive) return;
+                    if (v.HalvesActive || layer != SurfaceLayer.FreshAsphaltCover) return;
                     if (covers) set.Add(ahead);
                     return;
                 }
@@ -578,21 +579,29 @@ namespace RealisticRoadWorks.V3
                 }
             }
             // build / rebuild
-            if (after) return;
             bool walk = cover == SubStripCover.OpenWalk || cover == SubStripCover.WorksWalk || cover == SubStripCover.Inside
                         || cover == SubStripCover.Terrain;
+            if (after)
+            {
+                // the new strip is paved: fresh asphalt (its markings stay covered) until the re-marking window starts
+                if (layer == SurfaceLayer.FreshAsphaltCover && !walk && RemarkPending(u, w)) set.Add(full);
+                return;
+            }
+            // what the strip was before it is dug: the ground (a build band: grass, also under the new sidewalk) or the old
+            // road / pavement (a rebuild band)
+            var untouched = b.Kind == BandKind.Build ? SurfaceLayer.GroundCover : SurfaceLayer.OldAsphaltCover;
             if (before)
             {
                 var wp = u.Prim(b.Window);
                 if (!pre || !(u.AllAtOnce || Closes(wp) || UpgradeUndecided(wp)) || cover == SubStripCover.OpenWalk) return;
-                if (!walk && layer == SurfaceLayer.FreshAsphaltCover) set.Add(full);
-                else if (walk && layer == SurfaceLayer.BaseCourseCover) set.Add(full);
+                if (!walk && layer == untouched) set.Add(full);
+                else if (walk && layer == (b.Kind == BandKind.Build ? SurfaceLayer.GroundCover : SurfaceLayer.BaseCourseCover)) set.Add(full);
                 return;
             }
             switch (cover)
             {
                 case SubStripCover.Traffic:
-                    if (layer == SurfaceLayer.FreshAsphaltCover) set.Add(full);
+                    if (layer == SurfaceLayer.OldAsphaltCover) set.Add(full);
                     return;
                 case SubStripCover.OpenWalk:
                     if (layer != SurfaceLayer.BaseCourseCover) return;
@@ -604,7 +613,7 @@ namespace RealisticRoadWorks.V3
                     {
                         case WorksPhase.Excavation:
                             if (layer == SurfaceLayer.RoadDirt) set.Add(done);
-                            else if (layer == SurfaceLayer.FreshAsphaltCover && pre) set.Add(ahead);
+                            else if (layer == untouched && pre) set.Add(ahead);
                             return;
                         case WorksPhase.Foundation:
                             if (layer == SurfaceLayer.BaseCourseCover) set.Add(done);
@@ -623,6 +632,7 @@ namespace RealisticRoadWorks.V3
                     {
                         case WorksPhase.Excavation:
                             if (layer == SurfaceLayer.RoadDirt) set.Add(done);
+                            else if (layer == SurfaceLayer.GroundCover && b.Kind == BandKind.Build && pre) set.Add(ahead);
                             return;
                         case WorksPhase.Foundation:
                             if (layer == SurfaceLayer.BaseCourseCover) set.Add(done);
@@ -637,6 +647,14 @@ namespace RealisticRoadWorks.V3
             }
         }
 
+        // A re-marking band's window is still to come at window w.
+        private static bool RemarkPending(in UpgradeView u, int w)
+        {
+            for (int i = 0; i < u.BandCount; i++)
+                if (u.Band(i).Kind == BandKind.Remark && u.Band(i).Window > w) return true;
+            return false;
+        }
+
         // The lateral pieces (CHAIN frame) band `band` owns: its range minus every build / rebuild / remove band that is not done
         // yet (those dress their own strip; the re-marking covers only what they left or finished).
         public static LatPieces UpgradeOwnLaterals(in ProjectView v, int band)
@@ -647,11 +665,15 @@ namespace RealisticRoadWorks.V3
             var b = u.Band(band);
             p.Add(b.Lo, b.Hi);
             if (b.Kind != BandKind.Remark) return p;
+            int w = v.Phase == WorksPhase.Complete ? u.WindowCount : u.Window;
+            bool beforeRemark = w < b.Window;
             for (int i = 0; i < u.BandCount; i++)
             {
                 if (i == band) continue;
                 var o = u.Band(i);
-                if (o.Kind == BandKind.Remark || u.StateOf(i) == BandState.Done) continue;
+                if (o.Kind == BandKind.Remark) continue;
+                // not done: the band dresses its strip; done build / rebuild before the re-marking: its fresh asphalt shows
+                if (u.StateOf(i) == BandState.Done && !(beforeRemark && o.Kind != BandKind.Remove)) continue;
                 p.Cut(o.Lo, o.Hi);
             }
             return p;

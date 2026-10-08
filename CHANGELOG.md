@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [3.2.1] - 2026-10-08
+
+### Fixed
+
+- Road upgrades no longer look finished before the works reach a strip: the old road that still carries traffic keeps a worn
+  old-asphalt look (with the yellow temporary lines), a strip that is not dug yet shows the ground it was (grass), and only
+  freshly paved asphalt is black until the final markings are painted.
+- The yellow temporary lines stop where the temporary lanes ease back to the road's own lanes before a junction, so they no
+  longer end in a jog at the junction.
+
+[3.2.1]: https://github.com/jasperaelvoet/realistic-road-works/releases/tag/v3.2.1
+
 ## [3.2.0] - 2026-10-07
 
 ### Added

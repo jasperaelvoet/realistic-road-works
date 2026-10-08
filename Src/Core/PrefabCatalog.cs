@@ -82,12 +82,15 @@ namespace RealisticRoadWorks.V3
         public const string LaneBlock = "RRW Lane Block";                   // the lane-drop experiment's clone (kept for it)
         public const string RoadDirt = "RRW Road Dirt";
         public const string MarkingBlackout = "RRW Marking Blackout";
+        public const string OldAsphaltCover = "RRW Old Asphalt Cover";      // upgrade works: the old road carrying traffic (over the new markings)
+        public const string GroundCover = "RRW Ground Cover";                // upgrade works: a strip that is not dug yet (grass over the new road)
         public const string OldAsphalt = "RRW Old Asphalt";                 // upgrade works: removed strip before break-up (Terrain only)
         public const string ConeLamp = "RRW Cone Lamp";                     // SafetyCone03 + RRW Amber Light 0.3 lux (optional, experimental switch)
 
         // ---- vanilla surfaces the RRW clones are built from (SurfacePrefab)
         public const string SrcAgriculture = "Agriculture Surface 01";  // dev-only experiment (RRW Topsoil Agri)
         public const string SrcOre = "Ore Surface 01";
+        public const string SrcGrass = "Grass Surface 01";
         public const string SrcSand = "Sand Surface 01";
         public const string SrcConcrete = "Concrete Surface 01";
         public const string SrcPavement = "Pavement Surface 01";       // Y3 source of the TempMarking variants (experimental switch)
@@ -119,6 +122,8 @@ namespace RealisticRoadWorks.V3
                 case SurfaceLayer.MarkingBlackout: return MarkingBlackout;
                 case SurfaceLayer.RoadDirt: return RoadDirt;
                 case SurfaceLayer.OldAsphalt: return OldAsphalt;
+                case SurfaceLayer.OldAsphaltCover: return OldAsphaltCover;
+                case SurfaceLayer.GroundCover: return GroundCover;
                 default: return FreshAsphaltCover;
             }
         }

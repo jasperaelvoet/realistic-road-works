@@ -534,9 +534,9 @@ namespace RealisticRoadWorks.V3
         }
 
         public static bool IsRaisedQueue(SurfaceLayer l) => l == SurfaceLayer.BaseCourseCover || l == SurfaceLayer.FreshAsphaltCover || l == SurfaceLayer.TempMarking
-                                                            || l == SurfaceLayer.RoadDirt;
+                                                            || l == SurfaceLayer.RoadDirt || l == SurfaceLayer.OldAsphaltCover || l == SurfaceLayer.GroundCover;
         public static bool IsRoadsLayer(SurfaceLayer l) => l == SurfaceLayer.BaseCourseCover || l == SurfaceLayer.FreshAsphalt || l == SurfaceLayer.FreshAsphaltCover || l == SurfaceLayer.TempMarking
-                                                           || l == SurfaceLayer.RoadDirt;
+                                                           || l == SurfaceLayer.RoadDirt || l == SurfaceLayer.OldAsphaltCover || l == SurfaceLayer.GroundCover;
 
         // Layers that become fading scars at Completing (Surfaces re-tags them RRWDerived{site = Null, group Scar}).
         // Construction keeps only the VERGE layers (topsoil, subgrade), fading out within kVergeEndHours (~1 h).
@@ -711,10 +711,17 @@ namespace RealisticRoadWorks.V3
                     float F = QuantizeFront(MainFront(v), U);
                     if (v.SwapActive)
                     {
-                        if (StageIndexOf(v) == 0) return firstWorks ? new Span(F, U) : new Span(0f, U);
+                        // upgrade works: the open half is the old road carrying traffic (OldAsphaltCover), not fresh asphalt
+                        if (StageIndexOf(v) == 0) return firstWorks ? new Span(F, U) : v.IsUpgrade ? Span.Empty : new Span(0f, U);
                         return firstWorks ? Span.Empty : new Span(F, U);
                     }
-                    return firstWorks ? new Span(F, U) : new Span(TapeFront(v), U);
+                    return firstWorks ? new Span(F, U) : v.IsUpgrade ? Span.Empty : new Span(TapeFront(v), U);
+                }
+                case SurfaceLayer.OldAsphaltCover:
+                {
+                    if (!v.IsUpgrade || firstWorks) return Span.Empty;
+                    if (v.SwapActive) return StageIndexOf(v) == 0 ? new Span(0f, U) : Span.Empty;
+                    return new Span(TapeFront(v), U);
                 }
                 case SurfaceLayer.TempMarking:
                     return (half & RRWConst.kStagedOpenHalf) != 0 ? SurfaceSpanSingle(SurfaceLayer.TempMarking, v) : Span.Empty;

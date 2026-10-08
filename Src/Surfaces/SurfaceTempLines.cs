@@ -180,6 +180,14 @@ namespace RealisticRoadWorks.V3.Surfaces
                 var span = new Span(math.min(v.Trim0, v.Trim1), math.max(v.Trim0, v.Trim1));
                 m_ProjSpan[(int)SurfaceLayer.TempMarking] = span;
                 if (!PhasePlan.ToEdgeLocal(span, c.Site.m_ChainU0, c.Site.m_ChainU1, c.L, out ls0, out ls1)) why = "no span on this edge";
+                else if (m_LinesFromPlan)
+                {
+                    // temporary lanes ease back to the road's own lanes near each edge end (TrafficLaneShift): the lines stop there
+                    float taper = math.min(RRWConst.kUwLaneTaperTo, c.L * 0.5f - 1f);
+                    ls0 = math.max(ls0, taper);
+                    ls1 = math.min(ls1, c.L - taper);
+                    if (ls1 - ls0 < 2f) why = "edge too short for temporary lines";
+                }
             }
             if (why == null && !SurfaceGeom.GeometricRange(SurfaceLayer.TempMarking, ls0, ls1, c.L, es.Ends, out gs0, out gs1, out cutS, out cutE,
                                                           out rs, out re, out _, out _))
@@ -232,6 +240,7 @@ namespace RealisticRoadWorks.V3.Surfaces
         // m_UwLines for the edge (EDGE frame line centres). Null when there are lines, else why not.
         private string UpgradeLineSet(EdgeCtx c)
         {
+            m_LinesFromPlan = false;
             m_UwLines.Clear();
             m_UwLanes.Clear();
             var cs = c.Ue.CrossSection;
@@ -283,8 +292,11 @@ namespace RealisticRoadWorks.V3.Surfaces
 
         // Lines of a temporary lane plan: edge lines inside the outer slot edges, a centre line (double in the NA theme) between
         // opposing slots, dashed lines between slots of one direction.
+        private bool m_LinesFromPlan;   // the current line set follows a temporary lane plan (lines stop before the edge-end tapers)
+
         private string PlanLineSet(TempLanePlan plan)
         {
+            m_LinesFromPlan = true;
             m_UwLines.Clear();
             m_UwLanes.Clear();
             UpgradeTempLanes.Lines(plan, s_PlanLines);
