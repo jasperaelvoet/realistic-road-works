@@ -1,3 +1,5 @@
+# This was a vibe coding experiment, mod is unlisted now. Don't have the time or resources to maintain it, feel free to fork.
+
 # Realistic Road Works
 
 [Paradox Mods](https://mods.paradoxplaza.com/mods/162194/Windows) · [Latest release](https://github.com/jasperaelvoet/realistic-road-works/releases/latest) · [Showcase video](https://github.com/jasperaelvoet/realistic-road-works/releases/download/v3.0.0/realistic-road-works-showcase.mp4)
